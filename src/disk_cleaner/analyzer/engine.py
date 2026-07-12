@@ -152,6 +152,28 @@ class AnalysisEngine:
     ):
         """流式分析——逐文件 yield 结果，供 SSE 推送"""
         from collections.abc import Generator as Gen
+
+        # 单文件处理
+        if os.path.isfile(path):
+            fi = FileInfo(
+                path=os.path.abspath(path),
+                size=os.path.getsize(path),
+                mtime=os.path.getmtime(path),
+            )
+            self._stats["total"] = 1
+            mtime_int = int(fi.mtime)
+            if not force:
+                cached = self.cache.get(fi.path, mtime_int, fi.size)
+                if cached:
+                    reason = cached.get("reason", "")
+                    if "AI 响应格式异常" not in reason and "响应被截断" not in reason:
+                        self._stats["cache_hits"] += 1
+                        yield {"type": "result", "current": 1, "total": 1, "result": self._cache_to_result(fi, cached)}
+                        return
+            result = self._analyze_single(fi)
+            yield {"type": "result", "current": 1, "total": 1, "result": result}
+            return
+
         file_infos = scan_directory(path, top_n=top_n, recursive=recursive)
         self._stats["total"] = len(file_infos)
         total = len(file_infos)
