@@ -11,7 +11,7 @@ pip install -e ".[dev]"
 | 命令 | 用途 | 示例 |
 |------|------|------|
 | `scan` | 扫描目录找大文件 | `disk-cleaner scan C:\Users --top 50` |
-| `analyze` | AI 分析可清理性 | `disk-cleaner analyze C:\Users -p openai` |
+| `analyze` | AI 分析可清理性 | `disk-cleaner analyze C:\Users -p deepseek` |
 | `migrate` | 分析哪些能搬到 D 盘 | `disk-cleaner migrate C:\ -t D:\Relocated` |
 | `check-deps` | 检查 DLL 是否被引用 | `disk-cleaner check-deps C:\Program Files` |
 | `clean` | 执行清理 | `disk-cleaner clean file1.tmp file2.log -m backup` |
@@ -22,6 +22,7 @@ pip install -e ".[dev]"
 | `stats` | 清理统计 | `disk-cleaner stats` |
 | `gui` | Web 图形界面 | `disk-cleaner gui --port 8765` |
 | `tray` | 系统托盘驻留 | `disk-cleaner tray` |
+| `config` | 管理 API Key | `disk-cleaner config set-key deepseek <key>` |
 
 ---
 
@@ -186,7 +187,7 @@ disk-cleaner gui --port 9090        # 指定端口
 disk-cleaner gui --no-browser       # 不自动打开浏览器
 ```
 
-打开 `http://127.0.0.1:8765`，界面提供：扫描输入框、一键分析、结果表格、选中清理。
+打开 `http://127.0.0.1:8765`，界面提供：扫描输入框、AI 复选框（需先配置 Key）、SSE 实时进度条、结果逐条呈现、点击文件名在资源管理器中定位、全选/批量清理、导出报告。
 
 ### 12. `tray` — 系统托盘
 
@@ -270,26 +271,20 @@ disk-cleaner check-deps <要搬迁的目录>
 所有数据存储在 `~/.disk-cleaner/`：
 ```
 ~/.disk-cleaner/
-├── cache.db          # AI 分析缓存
-├── rules.db          # 规则库
-├── config.yaml       # 用户配置
+├── cache.db          # AI 分析缓存 + 规则库 + 扫描记录
 ├── schedule.json     # 定时任务配置
-├── logs/
-│   ├── scan_errors.log
-│   └── clean_history.log
 └── credentials/
-    └── keys.enc
+    └── keys.enc      # API Key（Windows DPAPI 加密）
 ```
 
 备份区默认在 `~/disk-cleaner-backup/`，30 天自动清理。
 
 ## 卸载
 
-```bash
-disk-cleaner uninstall
-# 或手动删除：
-#   ~/.disk-cleaner/
-#   ~/disk-cleaner-backup/
+手动删除以下目录：
+```
+~/.disk-cleaner/
+~/disk-cleaner-backup/
 ```
 
 ## 获取帮助

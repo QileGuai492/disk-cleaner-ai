@@ -63,7 +63,7 @@ class TestAnalysisEngine:
         engine.analyze_directory(str(temp_dir), top_n=10)
         # 第二次扫描应该全部命中缓存
         results = engine.analyze_directory(str(temp_dir), top_n=10)
-        cached = [r for r in results if r.get("source") == "cache"]
+        cached = [r for r in results if "cache" in str(r.get("source", ""))]
         assert len(cached) > 0
         # 不应该再有 AI 调用
         ai_called = [r for r in results if r.get("source") == "ai"]
@@ -135,7 +135,7 @@ class TestEngineCacheIntegration:
         engine2 = AnalysisEngine(db, ai_provider="ollama")
         results = engine2.analyze_directory(str(temp_dir), top_n=10)
 
-        cached = [r for r in results if r.get("source") == "cache"]
+        cached = [r for r in results if "cache" in str(r.get("source", ""))]
         assert len(cached) > 0
 
 

@@ -70,10 +70,12 @@ def scan_directory(
 
     results: list[FileInfo] = []
     skipped: list[dict] = []
+    root_files: list[FileInfo] = []
+    heap: list[tuple[int, int, FileInfo]] = []
+    _top_n = top_n
+    _sub_files: list[FileInfo] = []  # 无限制模式下的子目录文件
 
-    use_heap = top_n is not None
-
-    def _scan_dir(dirpath: str) -> None:
+    def _collect(dirpath: str, is_root: bool = False) -> None:
         try:
             entries = os.scandir(dirpath)
         except PermissionError:
@@ -101,31 +103,38 @@ def scan_directory(
                 size=stat.st_size,
                 mtime=stat.st_mtime,
             )
-            if use_heap:
-                # 用堆保持 top N（size 为排序键，id 打破平局）
-                heapq.heappush(results, (fi.size, id(fi), fi))
-                while len(results) > top_n:
-                    heapq.heappop(results)
+            if is_root:
+                root_files.append(fi)
+            elif _top_n is not None:
+                heapq.heappush(heap, (fi.size, id(fi), fi))
+                while len(heap) > _top_n:
+                    heapq.heappop(heap)
             else:
-                results.append(fi)
+                _sub_files.append(fi)
+
+    # 先扫描根目录——全部收集
+    _collect(path, is_root=True)
 
     if recursive:
         scanned_count = 0
         for dirpath, dirnames, filenames in os.walk(path, followlinks=not skip_symlinks):
-            _scan_dir(dirpath)
+            if os.path.abspath(dirpath) == os.path.abspath(path):
+                continue  # 跳过根目录
+            _collect(dirpath)
             scanned_count += 1
-            # 扫描 500 个目录后停止，防止超大目录卡死
             if scanned_count > 500:
                 break
-    else:
-        _scan_dir(path)
 
-    if use_heap:
-        results = sorted([r[2] for r in results], key=lambda x: x.size, reverse=True)
+    # 合并：根目录全量 + 子目录堆提取 + 无限制模式子目录
+    root_files.sort(key=lambda x: x.size, reverse=True)
+    if _top_n is not None:
+        sub_heap = sorted([h[2] for h in heap], key=lambda x: x.size, reverse=True)
+        results = root_files + sub_heap
+        if len(results) > _top_n:
+            results = results[:_top_n]
     else:
-        results.sort(key=lambda x: x.size, reverse=True)
-        if top_n is not None:
-            results = results[:top_n]
+        _sub_files.sort(key=lambda x: x.size, reverse=True)
+        results = root_files + _sub_files
 
     if collect_errors:
         return results, skipped

@@ -22,12 +22,13 @@ def _encrypt_win32(data: bytes) -> bytes:
 
     crypt32 = ctypes.windll.crypt32
 
-    blob_in = DATA_BLOB(len(data), ctypes.c_char_p(data))
+    buf_in = ctypes.create_string_buffer(data)
+    blob_in = DATA_BLOB(len(data), ctypes.cast(buf_in, ctypes.POINTER(ctypes.c_char)))
     blob_out = DATA_BLOB()
 
     if not crypt32.CryptProtectData(
         ctypes.byref(blob_in),
-        "disk-cleaner-key",
+        ctypes.create_string_buffer(b"disk-cleaner-key"),
         None, None, None, 0,  # CRYPTPROTECT_UI_FORBIDDEN
         ctypes.byref(blob_out),
     ):
@@ -48,7 +49,8 @@ def _decrypt_win32(data: bytes) -> bytes:
 
     crypt32 = ctypes.windll.crypt32
 
-    blob_in = DATA_BLOB(len(data), ctypes.c_char_p(data))
+    buf_in = ctypes.create_string_buffer(data)
+    blob_in = DATA_BLOB(len(data), ctypes.cast(buf_in, ctypes.POINTER(ctypes.c_char)))
     blob_out = DATA_BLOB()
 
     if not crypt32.CryptUnprotectData(

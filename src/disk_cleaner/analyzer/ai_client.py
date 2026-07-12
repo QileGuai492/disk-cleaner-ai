@@ -87,8 +87,10 @@ def parse_ai_response(text: str, is_cluster: bool = False) -> FileAnalysisOutput
 
 def build_single_file_prompt(inp: FileAnalysisInput) -> str:
     """构建单文件分析 prompt（自然语言）"""
+    from datetime import datetime as _dt
     lines = [
         "请分析以下文件是否可以安全删除：",
+        f"  当前日期: {_dt.now().strftime('%Y-%m-%d')}（UTC）",
         f"  路径: {inp.path}",
         f"  大小: {inp.size_mb} MB",
         f"  扩展名: {inp.extension or '(无)'}",

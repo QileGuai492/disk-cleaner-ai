@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -52,14 +53,19 @@ table{width:100%;table-layout:fixed;border-collapse:collapse;margin-top:12px}
 th,td{padding:6px 8px;text-align:left;border-bottom:1px solid #30363d;font-size:13px;white-space:nowrap}
 th{color:#8b949e;font-weight:600}
 th:nth-child(1),td:nth-child(1){width:30px;text-align:center;padding:6px 2px}
-th:nth-child(2),td:nth-child(2){width:33%}
-th:nth-child(3),td:nth-child(3){width:12%}
-th:nth-child(4),td:nth-child(4){width:12%}
-th:nth-child(5),td:nth-child(5){width:11%}
-th:nth-child(6),td:nth-child(6){width:32%}
-.cell-scroll{overflow-x:auto;white-space:nowrap;max-width:100%}
+th:nth-child(2),td:nth-child(2){width:30%}
+th:nth-child(3),td:nth-child(3){width:10%}
+th:nth-child(4),td:nth-child(4){width:10%}
+th:nth-child(5),td:nth-child(5){width:10%}
+th:nth-child(6),td:nth-child(6){width:40%}
+tr{min-height:36px}
+td:nth-child(6){max-height:60px}
+.cell-scroll{overflow-x:auto;white-space:nowrap;max-width:100%;padding:4px 0}
 .cell-scroll::-webkit-scrollbar{height:6px}
-.cell-scroll::-webkit-scrollbar-thumb{background:#8b949e;border-radius:3px}
+.cell-scroll::-webkit-scrollbar-thumb{background:#8b949e;border-radius:2px}
+.reason-scroll{overflow-y:auto;white-space:normal;word-break:break-all;max-height:54px;line-height:1.4}
+.reason-scroll::-webkit-scrollbar{width:4px}
+.reason-scroll::-webkit-scrollbar-thumb{background:#8b949e;border-radius:2px}
 .safe{color:#7ee787}.likely{color:#d2a8ff}.review{color:#d29922}.keep{color:#f85149}
 .progress{height:4px;background:#30363d;border-radius:2px;margin:10px 0}
 .progress-bar{height:100%;background:#238636;border-radius:2px;transition:width .3s}
@@ -70,6 +76,8 @@ th:nth-child(6),td:nth-child(6){width:32%}
 .stat .num{font-size:24px;font-weight:700}
 .stat .label{font-size:11px;color:#8b949e;margin-top:4px}
 .empty{text-align:center;color:#484f58;padding:40px 0;font-size:14px}
+td a{color:#58a6ff;text-decoration:none;cursor:pointer}
+td a:hover{text-decoration:underline}
 </style></head>
 <body>
 <h1>AI 磁盘清理工具</h1>
@@ -83,7 +91,7 @@ th:nth-child(6),td:nth-child(6){width:32%}
     <label class="chk"><input type="checkbox" id="recursive">子目录</label>
     <button id="scanBtn" onclick="handleScan()">开始分析</button>
     <label class="chk" id="aiLabel" title="需先配置 API Key"><input type="checkbox" id="useAI" onchange="toggleAI()" disabled>AI</label>
-    <select id="provider" disabled><option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option><option value="ollama">Ollama</option></select>
+    <select id="provider" disabled></select>
   </div>
   <div id="progressContainer" style="display:none">
     <div class="progress"><div class="progress-bar" id="progressBar" style="width:0%"></div></div>
@@ -113,7 +121,7 @@ function toggleAI() {
 function fmtSize(b) {if(b>1e9)return (b/1e9).toFixed(2)+' GB';return (b/1e6).toFixed(1)+' MB'}
 const DECO={'safe_to_delete':'safe','likely_safe':'likely','needs_review':'review','keep':'keep','critical':'keep'}
 const LBL={safe_to_delete:'可删除',likely_safe:'概率可删',needs_review:'需确认',keep:'保留',critical:'禁止删除'}
-const SRC={cache:'缓存',rule:'规则',ai:'AI',local:'本地分析',dependency:'依赖分析',fingerprint:'指纹库',cancelled:'已取消',error:'异常',ai_cluster:'AI聚类',ai_cross_cluster:'AI交叉聚类'}
+const SRC={cache:'缓存',rule:'规则',ai:'AI',local:'本地分析','rule+cache':'规则+缓存','ai+cache':'AI+缓存','local+cache':'本地分析+缓存',dependency:'依赖分析',fingerprint:'指纹库',cancelled:'已取消',error:'异常',ai_cluster:'AI聚类',ai_cross_cluster:'AI交叉聚类'}
 
 // 页面持久化
 function saveState() {
@@ -128,20 +136,34 @@ function loadState() {
   $('top').value = localStorage.getItem('dc_top')||'50';
   $('recursive').checked = localStorage.getItem('dc_recursive')==='true';
   $('useAI').checked = localStorage.getItem('dc_useAI')==='true';
-  $('provider').value = localStorage.getItem('dc_provider')||'deepseek';
   toggleAI();
   const saved = localStorage.getItem('dc_results');
   if (saved) {
-    try { showResults(JSON.parse(saved)); } catch(e) {}
+    try {
+      const data = JSON.parse(saved);
+      // 检测旧版空壳数据，自动清除
+      if (data.results && data.results.length > 0 && data.results[0].size === 0 && data.results[0].decision === '') {
+        localStorage.removeItem('dc_results');
+      } else {
+        showResults(data);
+      }
+    } catch(e) {}
   }
 }
 
 // 检测 AI 是否已配置
+const AI_NAMES={deepseek:'DeepSeek',openai:'OpenAI',claude:'Claude',gemini:'Gemini',ollama:'Ollama (本地)'};
 async function checkAIConfig() {
   const r = await api('/api/check-ai', {});
-  if (r.configured) {
+  if (r.configured && r.providers.length > 0) {
     $('useAI').disabled = false;
     $('aiLabel').title = '启用云端AI可获得更准确的分析结果';
+    const sel = $('provider');
+    sel.innerHTML = r.providers.map(p => `<option value="${p}">${AI_NAMES[p]||p}</option>`).join('');
+    if (r.providers.length === 1) sel.value = r.providers[0];
+    // 恢复用户上次的选择
+    const saved = localStorage.getItem('dc_provider');
+    if (saved && r.providers.includes(saved)) sel.value = saved;
   }
 }
 
@@ -155,9 +177,13 @@ async function handleScan() {
   const btn = $('scanBtn');
   if (_busy) {
     // 正在扫描中，点按钮 = 取消
-    if (_ctrl) _ctrl.abort();
+    if (_ctrl) {
+      if (_ctrl._es) { _ctrl._es.close(); _ctrl._es = null; }
+      _ctrl.abort();
+    }
     _ctrl = null;
     _busy = false;
+    api('/api/cancel', {});  // 通知后端取消引擎
     $('progressBar').style.width = '0%';
     $('progressBar').classList.add('cancelled');
     $('status').textContent = '已取消';
@@ -178,22 +204,66 @@ async function handleScan() {
   $('status').textContent = '正在扫描...';
   $('resultsBody').innerHTML = '<div class="empty">分析中...</div>';
 
+  let _es = null;  // EventSource 引用，供取消用
+  let _results = [];
   try {
-    const scanParams = {path:cleanPath($('path').value),top:parseInt($('top').value),recursive:$('recursive').checked,
-      use_ai:$('useAI').checked, provider:$('provider').value, force:$('useAI').checked};
-    await api('/api/scan', scanParams);
+    const p=cleanPath($('path').value), t=parseInt($('top').value), r=$('recursive').checked,
+          ai=$('useAI').checked, prov=$('provider').value, f=false;
+    await api('/api/scan', {path:p,top:t,recursive:r,use_ai:ai,provider:prov,force:f});
     if (!_busy) { cancelled(); return; }
-    $('progressBar').style.width = '60%';
-    $('status').textContent = $('useAI').checked ? '正在 AI 分析...' : '正在本地分析...';
-    const results = await api('/api/analyze', scanParams);
-    if (!_busy) { cancelled(); return; }
-    $('progressBar').style.width = '100%';
-    $('status').textContent = '完成';
-    showResults(results);
+
+    // 初始化空表格
+    $('resultsBody').innerHTML =
+      `<div style="margin:8px 0;text-align:right">
+         <button onclick="cleanSelected()">清理选中</button>
+         <button onclick="getReport()" style="margin-left:6px">导出报告</button>
+       </div>
+       <div style="overflow-x:auto"><table id="resultsTable">
+         <thead><tr><th><input type="checkbox" onchange="toggleAll(this)" title="全选/取消全选"></th><th>文件</th><th>大小</th><th>判定</th><th>来源</th><th>理由</th></tr></thead>
+         <tbody id="resultsTbody"></tbody></table></div>`;
+
+    // SSE 流式分析
+    const qs = `path=${encodeURIComponent(p)}&top=${t}&recursive=${r}&use_ai=${ai}&provider=${prov}&force=${f}`;
+    _es = new EventSource(`/api/analyze-stream?${qs}`);
+    _ctrl._es = _es;  // 挂到 AbortController 上供取消
+
+    _es.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.type === 'progress') {
+        const pct = 20 + Math.round((d.current / d.total) * 80);
+        $('progressBar').style.width = pct + '%';
+        $('status').textContent = (ai ? 'AI 分析' : '本地分析') + `: ${d.current}/${d.total}`;
+        appendResult(d.result);
+        _results.push(d.result);
+      } else if (d.type === 'done') {
+        _es.close(); _es = null;
+        $('progressBar').style.width = '100%';
+        $('status').textContent = '完成';
+        finishResults(d.stats, d.summary);
+        // 用完整数据保存，刷新后可恢复
+        localStorage.setItem('dc_results', JSON.stringify({results: _results, stats: d.stats, summary: d.summary}));
+      } else if (d.type === 'error') {
+        _es.close(); _es = null;
+        $('status').textContent = '错误: ' + d.message;
+      } else if (d.type === 'cancelled') {
+        _es.close(); _es = null;
+        $('progressBar').style.width = d.current/d.total*80+20 + '%';
+        cancelled();
+      }
+    };
+    _es.onerror = () => {
+      if (_es) { _es.close(); _es = null; }
+      $('status').textContent = '连接中断';
+    };
+    // 等待流完成（用 Promise 包装 EventSource）
+    await new Promise((resolve) => {
+      const check = setInterval(() => { if (!_es) { clearInterval(check); resolve(); } }, 200);
+    });
   } catch(e) {
     console.log('handleScan error:', e);
     $('status').textContent = '错误: ' + e.message;
   } finally {
+    if (_es) { _es.close(); _es = null; }
     _ctrl = null;
     _busy = false;
     btn.textContent = '开始分析';
@@ -205,6 +275,46 @@ async function handleScan() {
 function cancelled() {
   $('progressBar').classList.add('cancelled');
   $('status').textContent = '已取消';
+}
+
+function appendResult(r) {
+  const showDir = $('recursive').checked;
+  const row = `<tr>
+    <td><input type="checkbox" value="${escAttr(r.path)}" ${r.decision==='safe_to_delete'?'checked':''}></td>
+    <td><div class="cell-scroll"><a href="#" class="filelink" data-path="${escAttr(r.path)}" title="在资源管理器中打开并选中">${escHtml(showDir?r.path.replace(/\\\\/g,'/').replace(cleanPath($('path').value).replace(/\\\\/g,'/').replace(/\\/$/,'')+'/',''):r.name)}</a></div></td>
+    <td>${fmtSize(r.size)}</td>
+    <td class="${DECO[r.decision]||''}">${LBL[r.decision]||r.decision}</td>
+    <td>${SRC[r.source]||r.source||''}</td>
+    <td><div class="reason-scroll">${escHtml(r.reason||'')}</div></td>
+  </tr>`;
+  const tbody = $('resultsTbody');
+  if (tbody) tbody.insertAdjacentHTML('beforeend', row);
+}
+
+function finishResults(stats, summary) {
+  $('summary').innerHTML =
+    `<div class="stat"><div class="num safe">${summary.safe||0}</div><div class="label">可清理</div></div>
+     <div class="stat"><div class="num likely">${summary.likely||0}</div><div class="label">可能可清理</div></div>
+     <div class="stat"><div class="num review">${summary.review||0}</div><div class="label">需确认</div></div>
+     <div class="stat"><div class="num keep">${summary.keep||0}</div><div class="label">建议保留</div></div>
+     <div class="stat"><div class="num">${stats.cache_hits||0}</div><div class="label">缓存命中</div></div>
+     <div class="stat"><div class="num">${stats.ai_calls||0}</div><div class="label">AI 调用</div></div>`;
+  // 排序：同目录聚拢
+  const tbody = $('resultsTbody');
+  if (!tbody) return;
+  const rows = [...tbody.querySelectorAll('tr')];
+  // 简单排序：按 depth + decision 重组 DOM
+  const scanRoot = cleanPath($('path').value).replace(/\\\\/g,'/');
+  rows.sort((a,b) => {
+    const pa = (a.querySelector('.filelink')?.dataset.path||'').replace(/\\\\/g,'/');
+    const pb = (b.querySelector('.filelink')?.dataset.path||'').replace(/\\\\/g,'/');
+    // 去掉扫描根路径后比较深度
+    const ra = pa.replace(scanRoot.replace(/\\/$/,'')+'/','');
+    const rb = pb.replace(scanRoot.replace(/\\/$/,'')+'/','');
+    const da = ra.split('/').length, db = rb.split('/').length;
+    return da - db || ra.localeCompare(rb);
+  });
+  rows.forEach(r => tbody.appendChild(r));
 }
 
 function showResults(data) {
@@ -226,22 +336,25 @@ function showResults(data) {
 
   const showDir = $('recursive').checked;
   $('resultsBody').innerHTML =
-    `<div style="margin:8px 0">
+    `<div style="margin:8px 0;text-align:right">
        <button onclick="cleanSelected()">清理选中</button>
        <button onclick="getReport()" style="margin-left:6px">导出报告</button>
      </div>
      <div style="overflow-x:auto"><table id="resultsTable">
-       <thead><tr><th></th><th>文件</th><th>大小</th><th>判定</th><th>来源</th><th>理由</th></tr></thead>
+       <thead><tr><th><input type="checkbox" onchange="toggleAll(this)" title="全选/取消全选"></th><th>文件</th><th>大小</th><th>判定</th><th>来源</th><th>理由</th></tr></thead>
        <tbody>${results.map(r=>`<tr>
          <td><input type="checkbox" value="${escAttr(r.path)}" ${r.decision==='safe_to_delete'?'checked':''}></td>
-         <td><div class="cell-scroll">${escHtml(showDir?r.path.replace(/\\\\/g,'/').replace(cleanPath($('path').value).replace(/\\\\/g,'/').replace(/\\/$/,'')+'/',''):r.name)}</div></td>
+         <td><div class="cell-scroll"><a href="#" class="filelink" data-path="${escAttr(r.path)}" title="在资源管理器中打开并选中">${escHtml(showDir?r.path.replace(/\\\\/g,'/').replace(cleanPath($('path').value).replace(/\\\\/g,'/').replace(/\\/$/,'')+'/',''):r.name)}</a></div></td>
          <td>${fmtSize(r.size)}</td>
          <td class="${DECO[r.decision]||''}">${LBL[r.decision]||r.decision}</td>
          <td>${SRC[r.source]||r.source||''}</td>
-         <td><div class="cell-scroll">${escHtml(r.reason||'')}</div></td>
+         <td><div class="reason-scroll">${escHtml(r.reason||'')}</div></td>
        </tr>`).join('')}</tbody></table></div>`;
 }
 
+function toggleAll(cb){
+  document.querySelectorAll('#resultsTable input[type=checkbox]').forEach(c=>c.checked=cb.checked)
+}
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function escAttr(s){return String(s).replace(/"/g,'&quot;')}
 
@@ -267,6 +380,14 @@ checkAIConfig();
   $(id).addEventListener('change',saveState);
   $(id).addEventListener('input',saveState);
 });
+// 文件链接点击——用事件委托避免 onclick 中的反斜杠转义问题
+$('resultsBody').addEventListener('click',async e=>{
+  const a=e.target.closest('.filelink');
+  if(!a)return;
+  e.preventDefault();
+  const r=await api('/api/open-file',{path:a.dataset.path});
+  if(r.error)alert(r.error);
+});
 </script></body></html>"""
 
 
@@ -279,6 +400,21 @@ class GUIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
             self._respond_html(GUI_HTML)
+        elif self.path.startswith("/api/analyze-stream"):
+            # EventSource GET 请求——从 query string 解析参数
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            data = {k: v[0] for k, v in qs.items()}
+            # 类型转换
+            if "top" in data:
+                data["top"] = int(data["top"])
+            if "recursive" in data:
+                data["recursive"] = data["recursive"].lower() != "false"
+            if "use_ai" in data:
+                data["use_ai"] = data["use_ai"].lower() == "true"
+            if "force" in data:
+                data["force"] = data["force"].lower() == "true"
+            self._handle_analyze_stream(data)
         else:
             self.send_response(404)
             self.end_headers()
@@ -304,8 +440,12 @@ class GUIHandler(BaseHTTPRequestHandler):
             self._handle_scan(data)
         elif self.path == "/api/analyze":
             self._handle_analyze(data)
+        elif self.path == "/api/analyze-stream":
+            self._handle_analyze_stream(data)
         elif self.path == "/api/clean":
             self._handle_clean(data)
+        elif self.path == "/api/open-file":
+            self._handle_open_file(data)
         elif self.path == "/api/cancel":
             self._handle_cancel()
         elif self.path == "/api/report":
@@ -344,7 +484,8 @@ class GUIHandler(BaseHTTPRequestHandler):
         db = _get_db()
         try:
             ai_provider = provider if use_ai else "local"
-            eng = AnalysisEngine(db, ai_provider=ai_provider)
+            model_defaults = {"deepseek": "deepseek-v4-flash", "openai": "gpt-4o-mini", "claude": "claude-3-haiku-20240307", "gemini": "gemini-1.5-flash", "ollama": "qwen2.5:1.5b"}
+            eng = AnalysisEngine(db, ai_provider=ai_provider, ai_model=model_defaults.get(provider, ""))
             GUIHandler.engine = eng
             results = eng.analyze_path(path, top_n=top, recursive=recursive, force=force)
             stats = eng.stats
@@ -363,6 +504,73 @@ class GUIHandler(BaseHTTPRequestHandler):
             self._respond_json({"error": f"分析出错: {e}"})
         finally:
             db.close()
+
+    def _handle_analyze_stream(self, data: dict):
+        """SSE 流式分析——逐文件推送进度"""
+        path = data.get("path", ".")
+        top = data.get("top", 100)
+        recursive = data.get("recursive", True)
+        use_ai = data.get("use_ai", False)
+        provider = data.get("provider", "deepseek")
+        force = data.get("force", False)
+
+        if not os.path.exists(path):
+            self._respond_json({"error": f"路径不存在: {path}"})
+            return
+
+        # SSE 响应头
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        db = _get_db()
+        results_buf: list[dict] = []
+        try:
+            ai_provider = provider if use_ai else "local"
+            model_defaults = {"deepseek": "deepseek-v4-flash", "openai": "gpt-4o-mini", "claude": "claude-3-haiku-20240307", "gemini": "gemini-1.5-flash", "ollama": "qwen2.5:1.5b"}
+            eng = AnalysisEngine(db, ai_provider=ai_provider, ai_model=model_defaults.get(provider, ""))
+            GUIHandler.engine = eng
+
+            for evt in eng.analyze_directory_stream(path, top_n=top, recursive=recursive, force=force):
+                if evt["type"] == "cancelled":
+                    self._sse_send({"type": "cancelled", "current": evt["current"], "total": evt["total"]})
+                    break
+                results_buf.append(evt["result"])
+                self._sse_send({"type": "progress", "current": evt["current"], "total": evt["total"], "result": evt["result"]})
+
+            stats = eng.stats
+            safe = len([r for r in results_buf if r["decision"] == "safe_to_delete"])
+            likely = len([r for r in results_buf if r["decision"] == "likely_safe"])
+            review = len([r for r in results_buf if r["decision"] == "needs_review"])
+            keep = len([r for r in results_buf if r["decision"] in ("keep", "critical")])
+            self._sse_send({"type": "done", "stats": stats, "summary": {"safe": safe, "likely": likely, "review": review, "keep": keep}})
+        except Exception as e:
+            self._sse_send({"type": "error", "message": str(e)})
+        finally:
+            db.close()
+
+    def _sse_send(self, data: dict):
+        """发送 SSE 事件"""
+        self.wfile.write(f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode())
+        self.wfile.flush()
+
+    def _handle_open_file(self, data: dict):
+        """在文件资源管理器中打开并选中文件"""
+        path = data.get("path", "")
+        if not path or not os.path.exists(path):
+            self._respond_json({"error": "文件不存在"})
+            return
+        try:
+            subprocess.run(
+                ["explorer", "/select,", os.path.abspath(path)],
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            )
+            self._respond_json({"status": "ok"})
+        except Exception as e:
+            self._respond_json({"error": str(e)})
 
     def _handle_cancel(self):
         if GUIHandler.engine:

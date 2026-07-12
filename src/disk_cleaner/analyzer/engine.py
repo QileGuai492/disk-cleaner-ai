@@ -1,6 +1,7 @@
 """分析引擎——串联缓存、规则、AI 的核心编排器"""
 
 import os
+import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -131,9 +132,60 @@ class AnalysisEngine:
             ai_result = self._analyze_single(fi)
             results.append(ai_result)
 
+        # 排序：当前目录文件在前，子目录按路径聚拢；同目录内按判定优先级→大小降序
         decision_order = {"safe_to_delete": 0, "likely_safe": 1, "needs_review": 2, "keep": 3, "critical": 4}
-        results.sort(key=lambda r: (decision_order.get(r["decision"], 2), -r["size"]))
+        scan_root = os.path.abspath(path)
+        def _sort_key(r):
+            rel = os.path.relpath(r["path"], scan_root)
+            depth = rel.count(os.sep)
+            parent = os.path.dirname(rel)
+            return (depth, parent, decision_order.get(r["decision"], 2), -r["size"])
+        results.sort(key=_sort_key)
         return results
+
+    def analyze_directory_stream(
+        self, path: str, top_n: int = 50, force: bool = False, recursive: bool = True
+    ):
+        """流式分析——逐文件 yield 结果，供 SSE 推送"""
+        from collections.abc import Generator as Gen
+        file_infos = scan_directory(path, top_n=top_n, recursive=recursive)
+        self._stats["total"] = len(file_infos)
+        total = len(file_infos)
+
+        if not file_infos:
+            return
+
+        # 第一遍：缓存命中 + 规则匹配直接 yield
+        needs_ai: list[FileInfo] = []
+        for fi in file_infos:
+            if self._cancelled:
+                yield {"type": "cancelled", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total}
+                return
+            if force:
+                needs_ai.append(fi)
+                continue
+            mtime_int = int(fi.mtime)
+            cached = self.cache.get(fi.path, mtime_int, fi.size)
+            if cached:
+                self._stats["cache_hits"] += 1
+                yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": self._cache_to_result(fi, cached)}
+                continue
+            match = self.rules.evaluate(fi)
+            if match and match.confidence >= 0.85:
+                self._stats["rule_hits"] += 1
+                result = self._rule_to_result(fi, match)
+                self._save_to_cache(fi, match.decision, match.confidence, match.reason, "rule")
+                yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": result}
+                continue
+            needs_ai.append(fi)
+
+        # 第二遍：AI 分析，逐文件 yield
+        for fi in needs_ai:
+            if self._cancelled:
+                yield {"type": "cancelled", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total}
+                return
+            ai_result = self._analyze_single(fi)
+            yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": ai_result}
 
     def relocate_analysis(self, path: str) -> list[dict]:
         """搬迁分析——识别可搬到 D 盘的大文件"""
@@ -207,13 +259,14 @@ class AnalysisEngine:
         prompt = build_single_file_prompt(inp)
         response = self.ai.analyze(prompt)
         output = parse_ai_response(response)
-        self._save_to_cache(fi, output.decision, output.confidence, output.reason, "ai")
+        data_source = "local" if self.ai_provider == "local" else "ai"
+        self._save_to_cache(fi, output.decision, output.confidence, output.reason, data_source)
         return {
             "path": fi.path, "name": fi.name, "size": fi.size, "size_mb": fi.size_mb,
             "extension": fi.extension, "mtime": fi.mtime,
             "decision": output.decision, "confidence": output.confidence,
             "reason": output.reason, "risk": output.risk,
-            "source": "local" if self.ai_provider == "local" else "ai",
+            "source": data_source,
         }
 
     def _save_to_cache(self, fi: FileInfo, decision: str, confidence: float, reason: str, source: str) -> None:
@@ -227,11 +280,15 @@ class AnalysisEngine:
             pass
 
     def _cache_to_result(self, fi: FileInfo, cached: dict) -> dict:
+        ai_model = cached.get("ai_model", "")
+        m = re.search(r"\(([^)]+)\)", ai_model)
+        orig = m.group(1) if m else ""
         return {
             "path": fi.path, "name": fi.name, "size": fi.size, "size_mb": fi.size_mb,
             "extension": fi.extension, "mtime": fi.mtime,
             "decision": cached["decision"], "confidence": cached["confidence"],
-            "reason": cached.get("reason", ""), "risk": cached.get("risk", "none"), "source": "cache",
+            "reason": cached.get("reason", ""), "risk": cached.get("risk", "none"),
+            "source": f"{orig}+cache" if orig else "cache",
         }
 
     def _rule_to_result(self, fi: FileInfo, match) -> dict:

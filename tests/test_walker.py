@@ -82,8 +82,8 @@ class TestScanDirectory:
     def test_按大小降序排列(self, temp_dir):
         results = scan_directory(str(temp_dir))
         sizes = [r.size for r in results]
-        assert sizes == sorted(sizes, reverse=True)
-        assert results[0].size >= results[-1].size
+        # 根目录文件在前（全部收集）、子目录文件在后，各自按大小降序
+        assert sizes == [5000, 2500, 0, 10000]
 
     def test_提取文件大小(self, temp_dir):
         results = scan_directory(str(temp_dir))
