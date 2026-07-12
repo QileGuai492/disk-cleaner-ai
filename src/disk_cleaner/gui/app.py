@@ -40,7 +40,9 @@ h1{color:#58a6ff;font-size:24px;margin-bottom:8px}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
 .card h2{font-size:16px;color:#f0f6fc;margin-bottom:12px}
 input,select,button{padding:5px 10px;border:1px solid #30363d;border-radius:6px;background:#0d1117;color:#c9d1d9;font-size:14px}
-input#path{width:380px;max-width:60vw}
+input#path{width:380px;max-width:60vw;padding-right:22px}
+button.clear{position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:18px;cursor:pointer;padding:0 4px;line-height:1}
+button.clear:hover{color:#f85149}
 button{background:#238636;color:#fff;cursor:pointer;border-color:#238636}
 button:hover:not(:disabled){background:#2ea043}
 button:disabled{opacity:.5;cursor:not-allowed}
@@ -86,7 +88,10 @@ td a:hover{text-decoration:underline}
 <div class="card">
   <h2>扫描磁盘</h2>
   <div style="margin-bottom:10px">
-    <input id="path" placeholder="输入目录路径">
+    <span style="position:relative;display:inline-block">
+      <input id="path" placeholder="输入目录路径" oninput="saveState()">
+      <button class="clear" onclick="$('path').value='';saveState()" title="清空">&#xD7;</button>
+    </span>
     <select id="top"><option value="50">50</option><option value="100">100</option><option value="200">200</option></select>
     <label class="chk"><input type="checkbox" id="recursive">子目录</label>
     <button id="scanBtn" onclick="handleScan()">开始分析</button>
@@ -137,17 +142,19 @@ function loadState() {
   $('recursive').checked = localStorage.getItem('dc_recursive')==='true';
   $('useAI').checked = localStorage.getItem('dc_useAI')==='true';
   toggleAI();
-  const saved = localStorage.getItem('dc_results');
-  if (saved) {
-    try {
-      const data = JSON.parse(saved);
-      // 检测旧版空壳数据，自动清除
-      if (data.results && data.results.length > 0 && data.results[0].size === 0 && data.results[0].decision === '') {
-        localStorage.removeItem('dc_results');
-      } else {
-        showResults(data);
-      }
-    } catch(e) {}
+  const savedPath = localStorage.getItem('dc_path');
+  if (savedPath) {
+    const saved = localStorage.getItem('dc_results');
+    if (saved) {
+      try {
+        const data = JSON.parse(saved);
+        if (data.results && data.results.length > 0 && data.results[0].size === 0 && data.results[0].decision === '') {
+          localStorage.removeItem('dc_results');
+        } else {
+          showResults(data);
+        }
+      } catch(e) {}
+    }
   }
 }
 
@@ -209,14 +216,43 @@ async function handleScan() {
   try {
     const p=cleanPath($('path').value), t=parseInt($('top').value), r=$('recursive').checked,
           ai=$('useAI').checked, prov=$('provider').value, f=false;
+    if (!p) { $('status').textContent = '请输入目录路径'; $('progressContainer').style.display = 'none'; return; }
     await api('/api/scan', {path:p,top:t,recursive:r,use_ai:ai,provider:prov,force:f});
     if (!_busy) { cancelled(); return; }
 
     // 初始化空表格
     $('resultsBody').innerHTML =
-      `<div style="margin:8px 0;text-align:right">
-         <button onclick="cleanSelected()">清理选中</button>
-         <button onclick="getReport()" style="margin-left:6px">导出报告</button>
+      `<div style="margin:8px 0;display:flex;justify-content:space-between;align-items:center">
+         <span>
+           <select id="filterSize" onchange="applyFilters()" style="width:auto;margin-right:6px;background:#161b22">
+             <option value="0">全部大小</option>
+             <option value="-1">< 1 MB</option>
+             <option value="1">>1 MB</option>
+             <option value="10">>10 MB</option>
+             <option value="100">>100 MB</option>
+             <option value="1024">>1 GB</option>
+           </select>
+           <select id="filterDecision" onchange="applyFilters()" style="width:auto;margin-right:6px">
+             <option value="all">全部判定</option>
+             <option value="safe_to_delete">可删除</option>
+             <option value="likely_safe">概率可删</option>
+             <option value="needs_review">需确认</option>
+             <option value="keep">保留</option>
+           </select>
+           <span style="position:relative;display:inline-block;margin-right:6px">
+             <input id="filterFile" placeholder="文件名" oninput="$('clearFile').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
+             <button id="clearFile" onclick="$('filterFile').value='';$('clearFile').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
+           </span>
+           <span style="position:relative;display:inline-block;margin-right:6px">
+             <input id="filterReason" placeholder="理由" oninput="$('clearReason').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
+             <button id="clearReason" onclick="$('filterReason').value='';$('clearReason').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
+           </span>
+           <button onclick="applyFilters()" style="margin-left:4px;background:#30363d;border-color:#30363d">筛选</button>
+         </span>
+         <span>
+           <button onclick="cleanSelected()">清理选中</button>
+           <button onclick="getReport()" style="margin-left:6px">导出报告</button>
+         </span>
        </div>
        <div style="overflow-x:auto"><table id="resultsTable">
          <thead><tr><th><input type="checkbox" onchange="toggleAll(this)" title="全选/取消全选"></th><th>文件</th><th>大小</th><th>判定</th><th>来源</th><th>理由</th></tr></thead>
@@ -240,20 +276,23 @@ async function handleScan() {
         $('progressBar').style.width = '100%';
         $('status').textContent = '完成';
         finishResults(d.stats, d.summary);
-        // 用完整数据保存，刷新后可恢复
         localStorage.setItem('dc_results', JSON.stringify({results: _results, stats: d.stats, summary: d.summary}));
+        setTimeout(() => { $('progressContainer').style.display = 'none'; }, 1500);
       } else if (d.type === 'error') {
         _es.close(); _es = null;
         $('status').textContent = '错误: ' + d.message;
+        setTimeout(() => { $('progressContainer').style.display = 'none'; }, 2000);
       } else if (d.type === 'cancelled') {
         _es.close(); _es = null;
         $('progressBar').style.width = d.current/d.total*80+20 + '%';
         cancelled();
+        setTimeout(() => { $('progressContainer').style.display = 'none'; }, 1500);
       }
     };
     _es.onerror = () => {
       if (_es) { _es.close(); _es = null; }
       $('status').textContent = '连接中断';
+      setTimeout(() => { $('progressContainer').style.display = 'none'; }, 2000);
     };
     // 等待流完成（用 Promise 包装 EventSource）
     await new Promise((resolve) => {
@@ -262,6 +301,7 @@ async function handleScan() {
   } catch(e) {
     console.log('handleScan error:', e);
     $('status').textContent = '错误: ' + e.message;
+    setTimeout(() => { $('progressContainer').style.display = 'none'; }, 2000);
   } finally {
     if (_es) { _es.close(); _es = null; }
     _ctrl = null;
@@ -279,7 +319,7 @@ function cancelled() {
 
 function appendResult(r) {
   const showDir = $('recursive').checked;
-  const row = `<tr>
+  const row = `<tr data-size-mb="${r.size_mb||0}" data-decision="${r.decision||''}" data-reason="${escAttr(r.reason||'')}" data-name="${escAttr(r.name||'')}">
     <td><input type="checkbox" value="${escAttr(r.path)}" ${r.decision==='safe_to_delete'?'checked':''}></td>
     <td><div class="cell-scroll"><a href="#" class="filelink" data-path="${escAttr(r.path)}" title="在资源管理器中打开并选中">${escHtml(showDir?r.path.replace(/\\\\/g,'/').replace(cleanPath($('path').value).replace(/\\\\/g,'/').replace(/\\/$/,'')+'/',''):r.name)}</a></div></td>
     <td>${fmtSize(r.size)}</td>
@@ -336,13 +376,41 @@ function showResults(data) {
 
   const showDir = $('recursive').checked;
   $('resultsBody').innerHTML =
-    `<div style="margin:8px 0;text-align:right">
-       <button onclick="cleanSelected()">清理选中</button>
-       <button onclick="getReport()" style="margin-left:6px">导出报告</button>
-     </div>
+    `<div style="margin:8px 0;display:flex;justify-content:space-between;align-items:center">
+         <span>
+           <select id="filterSize" onchange="applyFilters()" style="width:auto;margin-right:6px;background:#161b22">
+             <option value="0">全部大小</option>
+             <option value="-1">< 1 MB</option>
+             <option value="1">>1 MB</option>
+             <option value="10">>10 MB</option>
+             <option value="100">>100 MB</option>
+             <option value="1024">>1 GB</option>
+           </select>
+           <select id="filterDecision" onchange="applyFilters()" style="width:auto;margin-right:6px">
+             <option value="all">全部判定</option>
+             <option value="safe_to_delete">可删除</option>
+             <option value="likely_safe">概率可删</option>
+             <option value="needs_review">需确认</option>
+             <option value="keep">保留</option>
+           </select>
+           <span style="position:relative;display:inline-block;margin-right:6px">
+             <input id="filterFile" placeholder="文件名" oninput="$('clearFile').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
+             <button id="clearFile" onclick="$('filterFile').value='';$('clearFile').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
+           </span>
+           <span style="position:relative;display:inline-block;margin-right:6px">
+             <input id="filterReason" placeholder="理由" oninput="$('clearReason').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
+             <button id="clearReason" onclick="$('filterReason').value='';$('clearReason').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
+           </span>
+           <button onclick="applyFilters()" style="margin-left:4px;background:#30363d;border-color:#30363d">筛选</button>
+         </span>
+         <span>
+           <button onclick="cleanSelected()">清理选中</button>
+           <button onclick="getReport()" style="margin-left:6px">导出报告</button>
+         </span>
+       </div>
      <div style="overflow-x:auto"><table id="resultsTable">
        <thead><tr><th><input type="checkbox" onchange="toggleAll(this)" title="全选/取消全选"></th><th>文件</th><th>大小</th><th>判定</th><th>来源</th><th>理由</th></tr></thead>
-       <tbody>${results.map(r=>`<tr>
+       <tbody>${results.map(r=>`<tr data-size-mb="${r.size_mb||0}" data-decision="${r.decision||''}" data-reason="${escAttr(r.reason||'')}" data-name="${escAttr(r.name||'')}">
          <td><input type="checkbox" value="${escAttr(r.path)}" ${r.decision==='safe_to_delete'?'checked':''}></td>
          <td><div class="cell-scroll"><a href="#" class="filelink" data-path="${escAttr(r.path)}" title="在资源管理器中打开并选中">${escHtml(showDir?r.path.replace(/\\\\/g,'/').replace(cleanPath($('path').value).replace(/\\\\/g,'/').replace(/\\/$/,'')+'/',''):r.name)}</a></div></td>
          <td>${fmtSize(r.size)}</td>
@@ -352,15 +420,55 @@ function showResults(data) {
        </tr>`).join('')}</tbody></table></div>`;
 }
 
+function updateSelectAll(){
+  const visible = [...document.querySelectorAll('#resultsTable tbody tr')].filter(tr => tr.style.display !== 'none');
+  const allChecked = visible.length > 0 && visible.every(tr => tr.querySelector('input[type=checkbox]').checked);
+  const cb = document.querySelector('#resultsTable thead input[type=checkbox]');
+  if (cb) cb.checked = allChecked;
+}
+function applyFilters(){
+  const minMB = parseFloat($('filterSize').value);
+  const dec = $('filterDecision').value;
+  const reStr = $('filterReason')?.value || '';
+  const fileStr = $('filterFile')?.value || '';
+  let re = null, fileRe = null;
+  try { if (reStr) re = new RegExp(reStr, 'i'); } catch(e) {}
+  try { if (fileStr) fileRe = new RegExp(fileStr, 'i'); } catch(e) {}
+  const rows = document.querySelectorAll('#resultsTable tbody tr');
+  let visibleCount = 0;
+  rows.forEach(tr => {
+    const sizeMB = parseFloat(tr.dataset.sizeMb) || 0;
+    const decision = tr.dataset.decision || '';
+    const reason = tr.dataset.reason || '';
+    const name = tr.dataset.name || '';
+    const sizeOk = minMB < 0 ? sizeMB < 1 : sizeMB >= minMB;
+    const decOk = dec === 'all' || decision === dec || (dec === 'keep' && (decision === 'keep' || decision === 'critical'));
+    const reOk = !re || re.test(reason);
+    const fileOk = !fileRe || fileRe.test(name);
+    const show = sizeOk && decOk && reOk && fileOk;
+    tr.style.display = show ? '' : 'none';
+    if (show) visibleCount++;
+    // 隐藏行取消勾选
+    if (!show) tr.querySelector('input[type=checkbox]').checked = false;
+  });
+  const cb = document.querySelector('#resultsTable thead input[type=checkbox]');
+  if (cb) cb.checked = false;
+  $('status').textContent = '筛选结果: ' + visibleCount + ' 个文件';
+}
 function toggleAll(cb){
-  document.querySelectorAll('#resultsTable input[type=checkbox]').forEach(c=>c.checked=cb.checked)
+  document.querySelectorAll('#resultsTable tbody tr').forEach(tr => {
+    if (tr.style.display !== 'none') tr.querySelector('input[type=checkbox]').checked = cb.checked;
+  });
 }
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function escAttr(s){return String(s).replace(/"/g,'&quot;')}
 
 async function cleanSelected() {
-  const cbs = document.querySelectorAll('#resultsTable input:checked');
-  const files = [...cbs].map(c=>c.value);
+  const files = [...document.querySelectorAll('#resultsTable tbody tr')]
+    .filter(tr => tr.style.display !== 'none')
+    .map(tr => tr.querySelector('input[type=checkbox]'))
+    .filter(cb => cb && cb.checked)
+    .map(cb => cb.value);
   if (!files.length) return alert('请先勾选文件');
   if (!confirm('确认清理 ' + files.length + ' 个文件？')) return;
   const r = await api('/api/clean', {files});
@@ -380,13 +488,18 @@ checkAIConfig();
   $(id).addEventListener('change',saveState);
   $(id).addEventListener('input',saveState);
 });
-// 文件链接点击——用事件委托避免 onclick 中的反斜杠转义问题
+// 事件委托：文件链接 + 勾选框联动
 $('resultsBody').addEventListener('click',async e=>{
   const a=e.target.closest('.filelink');
-  if(!a)return;
-  e.preventDefault();
-  const r=await api('/api/open-file',{path:a.dataset.path});
-  if(r.error)alert(r.error);
+  if(a){
+    e.preventDefault();
+    const r=await api('/api/open-file',{path:a.dataset.path});
+    if(r.error)alert(r.error);
+    return;
+  }
+  if(e.target.type==='checkbox' && e.target.closest('tbody')){
+    updateSelectAll();
+  }
 });
 </script></body></html>"""
 

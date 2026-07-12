@@ -61,10 +61,27 @@ def parse_ai_response(text: str, is_cluster: bool = False) -> FileAnalysisOutput
     try:
         data = json.loads(json_text)
     except json.JSONDecodeError:
+        # 尝试补全截断的 JSON（max_tokens 不够时会被截断）
+        if json_text.startswith("{") and not json_text.rstrip().endswith("}"):
+            # 找最后一个完整的键值对，手动闭合
+            fixed = re.sub(r',\s*"[^"]*"\s*:\s*"[^"]*$', "", json_text.rstrip().rstrip(","))
+            fixed += "}"
+            try:
+                data = json.loads(fixed)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if "decision" in data:
+                    return FileAnalysisOutput(
+                        decision=data.get("decision", "needs_review"),
+                        confidence=float(data.get("confidence", 0.3)),
+                        reason=data.get("reason", "") + "（响应被截断）",
+                        risk=data.get("risk", "unknown"),
+                    )
         return FileAnalysisOutput(
             decision="needs_review",
             confidence=0.30,
-            reason=f"AI 响应格式异常，无法解析: {text[:200]}",
+            reason=f"AI 响应格式异常: {text[:200]}",
             risk="unknown",
         )
 
@@ -284,7 +301,7 @@ class AIProvider:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=300,
+            max_tokens=500,
         )
         content = response.choices[0].message.content or ""
         # 估算 token 和费用
@@ -318,7 +335,7 @@ class AIProvider:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=300,
+            max_tokens=500,
         )
         return response.choices[0].message.content or ""
 
@@ -334,7 +351,7 @@ class AIProvider:
                 params={"key": key},
                 json={
                     "contents": [{"parts": [{"text": self.SYSTEM_PROMPT + "\n\n" + prompt}]}],
-                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300},
+                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 500},
                 },
                 timeout=30,
             )
@@ -352,7 +369,7 @@ class AIProvider:
             client = anthropic.Anthropic(api_key=self.api_key)
             response = client.messages.create(
                 model=self.model,
-                max_tokens=300,
+                max_tokens=500,
                 system=self.SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
             )

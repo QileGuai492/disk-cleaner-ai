@@ -104,6 +104,10 @@ class AnalysisEngine:
             mtime_int = int(fi.mtime)
             cached = self.cache.get(fi.path, mtime_int, fi.size)
             if cached:
+                reason = cached.get("reason", "")
+                if "AI 响应格式异常" in reason or "响应被截断" in reason:
+                    needs_rules.append(fi)
+                    continue
                 self._stats["cache_hits"] += 1
                 results.append(self._cache_to_result(fi, cached))
                 continue
@@ -167,6 +171,10 @@ class AnalysisEngine:
             mtime_int = int(fi.mtime)
             cached = self.cache.get(fi.path, mtime_int, fi.size)
             if cached:
+                reason = cached.get("reason", "")
+                if "AI 响应格式异常" in reason or "响应被截断" in reason:
+                    needs_ai.append(fi)
+                    continue
                 self._stats["cache_hits"] += 1
                 yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": self._cache_to_result(fi, cached)}
                 continue
