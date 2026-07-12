@@ -33,27 +33,90 @@ GUI_HTML = """<!DOCTYPE html>
 <meta http-equiv="Pragma" content="no-cache">
 <title>AI 磁盘清理工具</title>
 <style>
+:root{
+  --bg:#0d1117;--bg-card:#161b22;--bg-input:#0d1117;--border:#30363d;
+  --text:#c9d1d9;--text-secondary:#8b949e;--text-heading:#f0f6fc;
+  --accent:#58a6ff;--accent-hover:#79c0ff;
+  --btn-bg:#238636;--btn-hover:#2ea043;--btn-text:#fff;
+  --btn-danger:#da3633;--btn-danger-hover:#f85149;
+  --safe:#7ee787;--likely:#d2a8ff;--review:#d29922;--keep:#f85149;
+  --progress-bg:#30363d;--empty:#484f58;
+}
+body.theme-gold{
+  --bg:#1a1410;--bg-card:#2d2218;--bg-input:#1e1812;--border:#5a4028;
+  --text:#e8d5b5;--text-secondary:#a89070;--text-heading:#f0d9a0;
+  --accent:#d4a853;--accent-hover:#e0b860;
+  --btn-bg:#b8860b;--btn-hover:#d4a017;--btn-text:#1a1410;
+  --btn-danger:#b04530;--btn-danger-hover:#d45a40;
+  --safe:#8cb860;--likely:#c8a8e8;--review:#d4a017;--keep:#d4745c;
+  --progress-bg:#4a3020;--empty:#5a4030;
+}
+body.theme-forest{
+  --bg:#0d1a12;--bg-card:#15261b;--bg-input:#0d1a12;--border:#2d4a32;
+  --text:#c5d8c0;--text-secondary:#7a9e78;--text-heading:#d8f0d0;
+  --accent:#4aaf6e;--accent-hover:#5ec97e;
+  --btn-bg:#3a8a52;--btn-hover:#4aaf6e;--btn-text:#fff;
+  --btn-danger:#a04040;--btn-danger-hover:#c05050;
+  --safe:#6ec878;--likely:#b0d0a0;--review:#c8b840;--keep:#d4745c;
+  --progress-bg:#2d4a32;--empty:#3a5040;
+}
+body.theme-ocean{
+  --bg:#0d1a2d;--bg-card:#152640;--bg-input:#0d1a2d;--border:#2a4060;
+  --text:#c0d0e0;--text-secondary:#6888a8;--text-heading:#d0e0f8;
+  --accent:#4a90d9;--accent-hover:#60a8f0;
+  --btn-bg:#3068b0;--btn-hover:#4a80d0;--btn-text:#fff;
+  --btn-danger:#b05050;--btn-danger-hover:#d06060;
+  --safe:#60c0a0;--likely:#98b8e0;--review:#c8b840;--keep:#d4745c;
+  --progress-bg:#2a4060;--empty:#385070;
+}
+body.theme-sunset{
+  --bg:#1d1418;--bg-card:#2d1a20;--bg-input:#1d1418;--border:#5a3040;
+  --text:#e8c8c8;--text-secondary:#b07080;--text-heading:#f0c0c0;
+  --accent:#e07050;--accent-hover:#f08060;
+  --btn-bg:#c05040;--btn-hover:#e06850;--btn-text:#fff;
+  --btn-danger:#a84060;--btn-danger-hover:#c85070;
+  --safe:#80b860;--likely:#c898b0;--review:#d4a040;--keep:#e06050;
+  --progress-bg:#5a3040;--empty:#604050;
+}
+body.theme-lavender{
+  --bg:#1a1428;--bg-card:#2a2038;--bg-input:#1a1428;--border:#4a3068;
+  --text:#d0c8e8;--text-secondary:#8878b0;--text-heading:#e0d8f8;
+  --accent:#9070d0;--accent-hover:#a888e8;
+  --btn-bg:#7058b0;--btn-hover:#8870d0;--btn-text:#fff;
+  --btn-danger:#a05060;--btn-danger-hover:#c06070;
+  --safe:#80c080;--likely:#b898e0;--review:#d0b040;--keep:#d4747c;
+  --progress-bg:#4a3068;--empty:#504070;
+}
+body.theme-mono{
+  --bg:#f0f0f0;--bg-card:#fff;--bg-input:#fff;--border:#ccc;
+  --text:#333;--text-secondary:#888;--text-heading:#111;
+  --accent:#555;--accent-hover:#333;
+  --btn-bg:#555;--btn-hover:#333;--btn-text:#fff;
+  --btn-danger:#c04040;--btn-danger-hover:#a03030;
+  --safe:#3a8a3a;--likely:#7040a0;--review:#b08020;--keep:#c04040;
+  --progress-bg:#ddd;--empty:#999;
+}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:system-ui,Segoe UI,sans-serif;background:#0d1117;color:#c9d1d9;max-width:960px;margin:0 auto;padding:20px}
-h1{color:#58a6ff;font-size:24px;margin-bottom:8px}
-.sub{color:#8b949e;font-size:14px;margin-bottom:20px}
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px}
-.card h2{font-size:16px;color:#f0f6fc;margin-bottom:12px}
-input,select,button{padding:5px 10px;border:1px solid #30363d;border-radius:6px;background:#0d1117;color:#c9d1d9;font-size:14px}
+body{font-family:system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--text);max-width:960px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:24px;margin-bottom:8px}
+.sub{color:var(--text-secondary);font-size:14px;margin-bottom:20px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}
+.card h2{font-size:16px;color:var(--text-heading);margin-bottom:12px}
+input,select,button{padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input);color:var(--text);font-size:14px}
 input#path{width:380px;max-width:60vw;padding-right:22px}
-button.clear{position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:18px;cursor:pointer;padding:0 4px;line-height:1}
-button.clear:hover{color:#f85149}
-button{background:#238636;color:#fff;cursor:pointer;border-color:#238636}
-button:hover:not(:disabled){background:#2ea043}
+button.clear{position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-secondary);font-size:18px;cursor:pointer;padding:0 4px;line-height:1}
+button.clear:hover{color:var(--keep)}
+button{background:var(--btn-bg);color:var(--btn-text);cursor:pointer;border-color:var(--btn-bg)}
+button:hover:not(:disabled){background:var(--btn-hover)}
 button:disabled{opacity:.5;cursor:not-allowed}
-button.cancel{background:#da3633;border-color:#da3633}
-button.cancel:hover:not(:disabled){background:#f85149}
+button.cancel{background:var(--btn-danger);border-color:var(--btn-danger)}
+button.cancel:hover:not(:disabled){background:var(--btn-danger-hover)}
 select{width:60px} select#provider{width:110px}
-label.chk{font-size:13px;color:#c9d1d9;cursor:pointer;margin:0 6px}
+label.chk{font-size:13px;color:var(--text);cursor:pointer;margin:0 6px}
 label.chk input{width:auto;margin:0 3px 0 0;vertical-align:middle;padding:0}
 table{width:100%;table-layout:fixed;border-collapse:collapse;margin-top:12px}
-th,td{padding:6px 8px;text-align:left;border-bottom:1px solid #30363d;font-size:13px;white-space:nowrap}
-th{color:#8b949e;font-weight:600}
+th,td{padding:6px 8px;text-align:left;border-bottom:1px solid var(--border);font-size:13px;white-space:nowrap}
+th{color:var(--text-secondary);font-weight:600}
 th:nth-child(1),td:nth-child(1){width:30px;text-align:center;padding:6px 2px}
 th:nth-child(2),td:nth-child(2){width:30%}
 th:nth-child(3),td:nth-child(3){width:10%}
@@ -61,29 +124,41 @@ th:nth-child(4),td:nth-child(4){width:10%}
 th:nth-child(5),td:nth-child(5){width:10%}
 th:nth-child(6),td:nth-child(6){width:40%}
 tr{min-height:36px}
-td:nth-child(6){max-height:60px}
 .cell-scroll{overflow-x:auto;white-space:nowrap;max-width:100%;padding:4px 0}
 .cell-scroll::-webkit-scrollbar{height:6px}
-.cell-scroll::-webkit-scrollbar-thumb{background:#8b949e;border-radius:2px}
+.cell-scroll::-webkit-scrollbar-thumb{background:var(--text-secondary);border-radius:2px}
 .reason-scroll{overflow-y:auto;white-space:normal;word-break:break-all;max-height:54px;line-height:1.4}
 .reason-scroll::-webkit-scrollbar{width:4px}
-.reason-scroll::-webkit-scrollbar-thumb{background:#8b949e;border-radius:2px}
-.safe{color:#7ee787}.likely{color:#d2a8ff}.review{color:#d29922}.keep{color:#f85149}
-.progress{height:4px;background:#30363d;border-radius:2px;margin:10px 0}
-.progress-bar{height:100%;background:#238636;border-radius:2px;transition:width .3s}
-.progress-bar.cancelled{background:#da3633}
-#status{color:#8b949e;font-size:13px;margin-top:8px}
+.reason-scroll::-webkit-scrollbar-thumb{background:var(--text-secondary);border-radius:2px}
+.safe{color:var(--safe)}.likely{color:var(--likely)}.review{color:var(--review)}.keep{color:var(--keep)}
+.progress{height:4px;background:var(--progress-bg);border-radius:2px;margin:10px 0}
+.progress-bar{height:100%;background:var(--btn-bg);border-radius:2px;transition:width .3s}
+.progress-bar.cancelled{background:var(--btn-danger)}
+#status{color:var(--text-secondary);font-size:13px;margin-top:8px}
 .summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:16px}
-.stat{background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:10px;text-align:center}
+.stat{background:var(--bg-input);border:1px solid var(--border);border-radius:6px;padding:10px;text-align:center}
 .stat .num{font-size:24px;font-weight:700}
-.stat .label{font-size:11px;color:#8b949e;margin-top:4px}
-.empty{text-align:center;color:#484f58;padding:40px 0;font-size:14px}
-td a{color:#58a6ff;text-decoration:none;cursor:pointer}
+.stat .label{font-size:11px;color:var(--text-secondary);margin-top:4px}
+.empty{text-align:center;color:var(--empty);padding:40px 0;font-size:14px}
+td a{color:var(--accent);text-decoration:none;cursor:pointer}
 td a:hover{text-decoration:underline}
 </style></head>
 <body>
+<div style="display:flex;justify-content:space-between;align-items:flex-start">
+<div>
 <h1>AI 磁盘清理工具</h1>
 <div class="sub">扫描 → AI 分析 → 安全清理</div>
+</div>
+<select id="themeSelect" onchange="switchTheme(this.value)" style="width:auto;margin-top:4px">
+<option value="dark">暗黑</option>
+<option value="mono">极简</option>
+<option value="gold">鎏金</option>
+<option value="forest">森林</option>
+<option value="ocean">海洋</option>
+<option value="sunset">日落</option>
+<option value="lavender">薰衣草</option>
+</select>
+</div>
 
 <div class="card">
   <h2>扫描磁盘</h2>
@@ -119,6 +194,11 @@ const $=id=>document.getElementById(id);
 async function api(path, data) {
   try {const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),signal:_ctrl?.signal});return r.json()}
   catch(e){return {error:e.message}}
+}
+function switchTheme(t){
+  document.body.className = t==='dark'?'':'theme-'+t;
+  localStorage.setItem('dc_theme',t);
+  $('themeSelect').value=t;
 }
 function toggleAI() {
   $('provider').disabled = !$('useAI').checked;
@@ -224,7 +304,7 @@ async function handleScan() {
     $('resultsBody').innerHTML =
       `<div style="margin:8px 0;display:flex;justify-content:space-between;align-items:center">
          <span>
-           <select id="filterSize" onchange="applyFilters()" style="width:auto;margin-right:6px;background:#161b22">
+           <select id="filterSize" onchange="applyFilters()" style="width:auto;margin-right:6px">
              <option value="0">全部大小</option>
              <option value="-1">< 1 MB</option>
              <option value="1">>1 MB</option>
@@ -247,7 +327,7 @@ async function handleScan() {
              <input id="filterReason" placeholder="理由" oninput="$('clearReason').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
              <button id="clearReason" onclick="$('filterReason').value='';$('clearReason').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
            </span>
-           <button onclick="applyFilters()" style="margin-left:4px;background:#30363d;border-color:#30363d">筛选</button>
+           <button onclick="applyFilters()" style="margin-left:4px">筛选</button>
          </span>
          <span>
            <button onclick="cleanSelected()">清理选中</button>
@@ -378,7 +458,7 @@ function showResults(data) {
   $('resultsBody').innerHTML =
     `<div style="margin:8px 0;display:flex;justify-content:space-between;align-items:center">
          <span>
-           <select id="filterSize" onchange="applyFilters()" style="width:auto;margin-right:6px;background:#161b22">
+           <select id="filterSize" onchange="applyFilters()" style="width:auto;margin-right:6px">
              <option value="0">全部大小</option>
              <option value="-1">< 1 MB</option>
              <option value="1">>1 MB</option>
@@ -401,7 +481,7 @@ function showResults(data) {
              <input id="filterReason" placeholder="理由" oninput="$('clearReason').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
              <button id="clearReason" onclick="$('filterReason').value='';$('clearReason').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
            </span>
-           <button onclick="applyFilters()" style="margin-left:4px;background:#30363d;border-color:#30363d">筛选</button>
+           <button onclick="applyFilters()" style="margin-left:4px">筛选</button>
          </span>
          <span>
            <button onclick="cleanSelected()">清理选中</button>
@@ -481,6 +561,7 @@ async function getReport() {
   w.document.write(r.html);
   w.document.close();
 }
+switchTheme(localStorage.getItem('dc_theme')||'dark');
 loadState();
 checkAIConfig();
 // 输入变化自动保存
