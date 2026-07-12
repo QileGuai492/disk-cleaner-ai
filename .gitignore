@@ -1,0 +1,23 @@
+*.pyc
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# API Key 加密存储
+~/.disk-cleaner/credentials/
+keys.enc
+
+# 数据库
+cache.db
+cache.db-wal
+cache.db-shm
+
+# 备份
+disk-cleaner-backup/
+
+# IDE
+.vscode/
+.idea/
+
+# env
+.env
