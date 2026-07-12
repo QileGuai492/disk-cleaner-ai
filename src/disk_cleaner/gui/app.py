@@ -276,6 +276,7 @@ async function handleScan() {
     $('status').textContent = '已取消';
     btn.textContent = '开始分析';
     btn.className = '';
+    setTimeout(() => { $('progressContainer').style.display = 'none'; }, 1500);
     return;
   }
   _ctrl = new AbortController();
@@ -361,7 +362,6 @@ async function handleScan() {
       } else if (d.type === 'error') {
         _es.close(); _es = null;
         $('status').textContent = '错误: ' + d.message;
-        setTimeout(() => { $('progressContainer').style.display = 'none'; }, 2000);
       } else if (d.type === 'cancelled') {
         _es.close(); _es = null;
         $('progressBar').style.width = d.current/d.total*80+20 + '%';
@@ -372,7 +372,6 @@ async function handleScan() {
     _es.onerror = () => {
       if (_es) { _es.close(); _es = null; }
       $('status').textContent = '连接中断';
-      setTimeout(() => { $('progressContainer').style.display = 'none'; }, 2000);
     };
     // 等待流完成（用 Promise 包装 EventSource）
     await new Promise((resolve) => {
@@ -381,7 +380,6 @@ async function handleScan() {
   } catch(e) {
     console.log('handleScan error:', e);
     $('status').textContent = '错误: ' + e.message;
-    setTimeout(() => { $('progressContainer').style.display = 'none'; }, 2000);
   } finally {
     if (_es) { _es.close(); _es = null; }
     _ctrl = null;
