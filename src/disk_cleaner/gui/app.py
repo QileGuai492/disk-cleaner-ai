@@ -142,6 +142,20 @@ tr{min-height:36px}
 .empty{text-align:center;color:var(--empty);padding:40px 0;font-size:14px}
 td a{color:var(--accent);text-decoration:none;cursor:pointer}
 td a:hover{text-decoration:underline}
+@media(max-width:768px){
+  body{padding:10px;max-width:100%}
+  h1{font-size:18px}
+  input,select,button{font-size:16px;padding:8px 12px}
+  input#path{width:100%;max-width:100%;box-sizing:border-box}
+  #scanBtn,#scanBtn+label{margin-top:8px}
+  th,td{font-size:11px;padding:4px}
+  th:nth-child(4),td:nth-child(4),th:nth-child(5),td:nth-child(5){display:none}
+  th:nth-child(2),td:nth-child(2){width:40%}
+  th:nth-child(6),td:nth-child(6){width:45%}
+  .summary{grid-template-columns:repeat(3,1fr);gap:6px}
+  .stat .num{font-size:18px}
+  .stat .label{font-size:10px}
+}
 </style></head>
 <body>
 <div style="display:flex;justify-content:space-between;align-items:flex-start">
@@ -813,7 +827,7 @@ def start_gui(port: int = 8765, open_browser: bool = True):
         except OSError:
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), GUIHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), GUIHandler)
     server.daemon_threads = True
     url = f"http://127.0.0.1:{port}"
     print(f"GUI 已启动: {url}")
