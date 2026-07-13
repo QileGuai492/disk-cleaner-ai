@@ -181,7 +181,7 @@ td a:hover{text-decoration:underline}
       <input id="path" placeholder="输入目录路径" oninput="saveState()">
       <button class="clear" onclick="$('path').value='';saveState()" title="清空">&#xD7;</button>
     </span>
-    <select id="top"><option value="50">50</option><option value="100">100</option><option value="200">200</option></select>
+    <select id="top"><option value="50">50</option><option value="100">100</option><option value="200">200</option><option value="500">500</option><option value="1000">1000</option></select>
     <label class="chk"><input type="checkbox" id="recursive">子目录</label>
     <button id="scanBtn" onclick="handleScan()">开始分析</button>
     <label class="chk" id="aiLabel" title="需先配置 API Key"><input type="checkbox" id="useAI" onchange="toggleAI()" disabled>AI</label>
