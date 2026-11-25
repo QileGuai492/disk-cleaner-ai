@@ -286,12 +286,18 @@ def clean(files: tuple, mode: str, yes: bool):
     click.echo(f"\n清理完成:")
     click.echo(f"  成功: {summary['success_count']} 个")
     if summary['failed_count'] > 0:
-        click.echo(f"  失败: {summary['failed_count']} 个")
-    freed = summary['total_freed']
+        click.echo(f"  失败/跳过: {summary['failed_count']} 个")
+    moved = summary.get("total_moved", 0)
+    freed = summary.get("total_freed_real", 0)
+    if moved:
+        click.echo(f"  移入备份: {moved / (1024**2):.1f} MB（删除备份后才真正释放）")
     if freed >= 1_000_000_000:
-        click.echo(f"  释放: {freed / (1024**3):.2f} GB")
+        click.echo(f"  实际释放: {freed / (1024**3):.2f} GB")
     else:
-        click.echo(f"  释放: {freed / (1024**2):.1f} MB")
+        click.echo(f"  实际释放: {freed / (1024**2):.1f} MB")
+    if executor.last_batch_id:
+        click.echo(f"  备份批次: {executor.last_batch_id}")
+        click.echo(f"  恢复命令: disk-cleaner backup restore {executor.last_batch_id}")
 
 
 @cli.command()
@@ -398,16 +404,28 @@ def check_deps(path: str):
 
     analyzer = DependencyAnalyzer()
     if os.path.isfile(path):
+        # 只检查目标文件自身永远查不到引用者：同时扫描其父目录。
+        # 这仍然不是全盘依赖扫描，所以绝不能把“未发现引用”表述成“安全”。
+        parent = os.path.dirname(os.path.abspath(path)) or "."
         analyzer.scan_imports(path)
+        analyzer.scan_directory(parent, max_files=3000)
         report = analyzer.analyze(path)
         refs = report.referrers
+        exe_refs = [r for r in refs if r.lower().endswith(".exe")]
+        click.echo(f"\n扫描范围: {parent}")
+        click.echo(f"已索引 PE 文件: {analyzer.get_stats()['pe_files']} 个")
         if refs:
             click.echo(f"\n{report.dll_name} 被以下文件引用:")
             for r in refs:
                 click.echo(f"  - {r}")
-            click.echo(f"\n共 {len(refs)} 处引用，{'不建议删除' if report.should_keep else '可以安全处理'}")
+            click.echo(
+                f"\n共 {len(refs)} 处引用（其中 {len(exe_refs)} 个 exe）。"
+                "存在引用，不建议删除。"
+            )
         else:
-            click.echo(f"\n{report.dll_name} 无引用，可以安全处理")
+            click.echo(f"\n在已扫描的范围内未发现 {report.dll_name} 的引用。")
+            click.echo("⚠ 这不等于安全：引用者可能位于其他目录、注册表、计划任务或服务中。")
+            click.echo("   请勿仅凭此结果删除文件；建议先备份，或用完整扫描工具复核。")
     else:
         analyzer.scan_directory(path)
         stats = analyzer.get_stats()
@@ -415,6 +433,7 @@ def check_deps(path: str):
         click.echo(f"  PE 文件: {stats['pe_files']} 个")
         click.echo(f"  唯一导入: {stats['unique_imports']} 个")
         click.echo(f"  引用关系: {stats['reverse_index_entries']} 条")
+        click.echo("\n注意：目录模式只统计导入关系，不给出逐个文件的安全结论。")
 
 
 @cli.command()

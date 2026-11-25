@@ -12,11 +12,13 @@ from disk_cleaner.analyzer.rules import RuleEngine
 from disk_cleaner.analyzer.profiler import ContentProfiler
 from disk_cleaner.analyzer.ai_client import (
     AIProvider,
+    AIUnavailableError,
     FileAnalysisInput,
     build_single_file_prompt,
     build_cluster_prompt,
     parse_ai_response,
 )
+from disk_cleaner.analyzer.anonymizer import PathAnonymizer
 from disk_cleaner.analyzer.fingerprints import FingerprintDB
 from disk_cleaner.analyzer.deps import DependencyAnalyzer
 from disk_cleaner.db.models import Database, AnalysisCache
@@ -31,6 +33,7 @@ class AnalysisEngine:
         ai_provider: str = "ollama",
         ai_model: str = "qwen2.5:1.5b",
         api_key: str = "",
+        cloud_blocklist: list[str] | None = None,
     ):
         self.db = db
         self.cache = AnalysisCache(db)
@@ -41,8 +44,26 @@ class AnalysisEngine:
         self.ai_provider = ai_provider
         self.ai_model = ai_model
         self.api_key = api_key
+        self.anonymizer = PathAnonymizer(level="strict")
+        self.cloud_blocklist = cloud_blocklist or []
         self._ai: AIProvider | None = None
-        self._stats = {"cache_hits": 0, "rule_hits": 0, "ai_calls": 0, "total": 0}
+        self._local_ai = AIProvider.create("local", model="heuristic")
+        self._stats = self._new_stats()
+        self._cancelled = False
+
+    @staticmethod
+    def _new_stats() -> dict:
+        return {
+            "cache_hits": 0,
+            "rule_hits": 0,
+            "ai_calls": 0,
+            "degraded": 0,
+            "total": 0,
+        }
+
+    def _begin_run(self) -> None:
+        """每次分析开始重置取消标记与统计，避免跨请求污染。"""
+        self._stats = self._new_stats()
         self._cancelled = False
 
     @property
@@ -63,6 +84,7 @@ class AnalysisEngine:
     ) -> list[dict]:
         """分析路径（文件或目录），自动判断类型"""
         if os.path.isfile(path):
+            self._begin_run()
             fi = FileInfo(
                 path=os.path.abspath(path),
                 size=os.path.getsize(path),
@@ -88,6 +110,7 @@ class AnalysisEngine:
         self, path: str, top_n: int = 50, force: bool = False, recursive: bool = True
     ) -> list[dict]:
         """分析目录中的所有文件，返回分析结果列表"""
+        self._begin_run()
         file_infos = scan_directory(path, top_n=top_n, recursive=recursive)
         self._stats["total"] = len(file_infos)
 
@@ -151,7 +174,7 @@ class AnalysisEngine:
         self, path: str, top_n: int = 50, force: bool = False, recursive: bool = True
     ):
         """流式分析——逐文件 yield 结果，供 SSE 推送"""
-        from collections.abc import Generator as Gen
+        self._begin_run()
 
         # 单文件处理
         if os.path.isfile(path):
@@ -271,40 +294,101 @@ class AnalysisEngine:
         return count
 
     def _analyze_single(self, fi: FileInfo) -> dict:
-        """AI 分析单个文件（本地内容预读 → AI 判断）"""
+        """分析单个文件：云端 AI 失败时显式降级，绝不冒充 AI。"""
         self._stats["ai_calls"] += 1
-        inp = FileAnalysisInput(
-            path=fi.path, size_mb=fi.size_mb, extension=fi.extension,
-            last_modified=datetime.fromtimestamp(fi.mtime).strftime("%Y-%m-%d"),
-            path_keywords=fi.path_keywords, analysis_round=1,
-        )
-        # 只在云端 AI 时读文件内容（本地模式用扩展名+路径判断足够快）
-        if self.ai_provider != "local":
+        use_cloud = self.ai_provider != "local"
+
+        if use_cloud and not self.anonymizer.should_send_to_cloud(fi.path, self.cloud_blocklist):
+            return self._analyze_local(
+                fi,
+                "该文件类型或路径禁止上传云端，已用本地规则判断",
+                source="local",
+            )
+
+        display_path = self.anonymizer.anonymize(fi.path) if use_cloud else fi.path
+        inp = self._build_input(fi, display_path)
+
+        # 只在云端 AI 时读取文件内容摘要
+        if use_cloud:
             try:
                 summary = self.profiler.profile(fi.path)
                 if summary and summary.file_type != "unknown":
                     inp.content_summary = summary.to_ai_dict()
             except Exception:
                 pass
+
         prompt = build_single_file_prompt(inp)
-        response = self.ai.analyze(prompt)
+
+        if not use_cloud:
+            response = self._local_ai.analyze(prompt)
+            output = parse_ai_response(response)
+            self._save_to_cache(
+                fi, output.decision, output.confidence, output.reason, "local", output.risk
+            )
+            return self._result_from_output(fi, output, "local")
+
+        try:
+            response = self.ai.analyze(prompt)
+        except AIUnavailableError as e:
+            self._stats["degraded"] += 1
+            return self._analyze_local(fi, f"AI 不可用：{e}", source="degraded")
+
         output = parse_ai_response(response)
-        data_source = "local" if self.ai_provider == "local" else "ai"
-        self._save_to_cache(fi, output.decision, output.confidence, output.reason, data_source)
+        self._save_to_cache(
+            fi, output.decision, output.confidence, output.reason, "ai", output.risk
+        )
+        return self._result_from_output(fi, output, "ai")
+
+    def _build_input(self, fi: FileInfo, display_path: str) -> FileAnalysisInput:
+        keywords = [
+            p for p in Path(display_path).parts
+            if not (len(p) == 3 and p[1] == ":" and p[2] == "\\")
+        ]
+        return FileAnalysisInput(
+            path=display_path,
+            size_mb=fi.size_mb,
+            extension=fi.extension,
+            last_modified=datetime.fromtimestamp(fi.mtime).strftime("%Y-%m-%d"),
+            path_keywords=keywords,
+            analysis_round=1,
+        )
+
+    def _analyze_local(self, fi: FileInfo, note: str, source: str) -> dict:
+        """本地启发式分析；只用于 local/degraded，不写入 AI 缓存。"""
+        inp = self._build_input(fi, fi.path)
+        prompt = build_single_file_prompt(inp)
+        response = self._local_ai.analyze(prompt)
+        output = parse_ai_response(response)
+        reason = f"{note}；{output.reason}" if note else output.reason
+        if source == "local":
+            self._save_to_cache(
+                fi, output.decision, output.confidence, reason, "local", output.risk
+            )
+        return self._result_from_output(fi, output, source, reason=reason)
+
+    def _result_from_output(self, fi: FileInfo, output, source: str, reason: str | None = None) -> dict:
         return {
             "path": fi.path, "name": fi.name, "size": fi.size, "size_mb": fi.size_mb,
             "extension": fi.extension, "mtime": fi.mtime,
             "decision": output.decision, "confidence": output.confidence,
-            "reason": output.reason, "risk": output.risk,
-            "source": data_source,
+            "reason": output.reason if reason is None else reason,
+            "risk": output.risk, "source": source,
         }
 
-    def _save_to_cache(self, fi: FileInfo, decision: str, confidence: float, reason: str, source: str) -> None:
+    def _save_to_cache(
+        self,
+        fi: FileInfo,
+        decision: str,
+        confidence: float,
+        reason: str,
+        source: str,
+        risk: str = "none",
+    ) -> None:
         try:
             self.cache.upsert(
                 file_path=fi.path, mtime=int(fi.mtime), size_bytes=fi.size,
                 decision=decision, confidence=confidence, reason=reason,
-                risk="none", ai_model=f"{self.ai_model}({source})",
+                risk=risk, ai_model=f"{self.ai_model}({source})",
             )
         except Exception:
             pass

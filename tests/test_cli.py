@@ -87,6 +87,26 @@ class TestAnalyzeCommand:
         assert result.exit_code == 0
 
 
+class TestCheckDeps:
+    """依赖检查不能再给出误导性的“可以安全处理”。"""
+
+    def test_单文件未发现引用时明确警告(self, runner, tmp_path):
+        target = tmp_path / "unknown.dll"
+        target.write_bytes(b"MZ" + b"\x00" * 100)
+
+        result = runner.invoke(cli, ["check-deps", str(target)])
+        assert result.exit_code == 0
+        assert "未发现" in result.output
+        assert "不等于安全" in result.output
+        assert "可以安全处理" not in result.output
+
+    def test_目录模式只给统计并提示局限(self, runner, tmp_path):
+        (tmp_path / "readme.txt").write_text("hello")
+        result = runner.invoke(cli, ["check-deps", str(tmp_path)])
+        assert result.exit_code == 0
+        assert "不给出逐个文件的安全结论" in result.output
+
+
 class TestCLIGeneral:
     """通用 CLI 测试"""
 

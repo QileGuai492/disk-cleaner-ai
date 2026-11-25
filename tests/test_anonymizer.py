@@ -81,3 +81,12 @@ class TestPathAnonymizer:
         assert anon.is_blocked_extension("file.pem") is True
         assert anon.is_blocked_extension("file.txt") is False
         assert anon.is_blocked_extension("file.jpg") is False
+        assert anon.is_blocked_extension(".env") is True
+        assert anon.is_blocked_extension("id_rsa") is True
+
+    def test_中文文件名保留扩展名(self, tmp_path):
+        target = tmp_path / "报告.docx"
+        target.write_text("data", encoding="utf-8")
+        result = PathAnonymizer(level="strict").anonymize(str(target))
+        assert "报告" not in result
+        assert result.endswith(".docx")

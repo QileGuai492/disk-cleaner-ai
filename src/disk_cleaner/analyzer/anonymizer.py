@@ -8,7 +8,8 @@ from pathlib import Path
 class PathAnonymizer:
     """路径脱敏器"""
 
-    BLOCKED_EXTENSIONS = {".kdbx", ".pem", ".pfx", ".env", ".key", ".p12"}
+    BLOCKED_EXTENSIONS = {".kdbx", ".pem", ".pfx", ".env", ".key", ".p12", ".enc"}
+    BLOCKED_NAMES = {"id_rsa", "id_dsa", "id_ed25519", ".env"}
 
     # 需要替换的敏感目录名（中文/特殊含义）
     SENSITIVE_SEGMENTS = {
@@ -49,12 +50,12 @@ class PathAnonymizer:
 
             # strict 模式：替换所有中文和敏感英文目录名
             if self.level == "strict" and (self._is_sensitive(part) or self._contains_chinese(part)):
-                result_parts.append(f"<DIR_{len(result_parts)}>")
+                result_parts.append(self._placeholder(part, len(result_parts), path, i, len(parts)))
                 continue
 
             # moderate 模式：只替换中文
             if self.level == "moderate" and self._contains_chinese(part):
-                result_parts.append(f"<DIR_{len(result_parts)}>")
+                result_parts.append(self._placeholder(part, len(result_parts), path, i, len(parts)))
                 continue
 
             result_parts.append(part)
@@ -71,10 +72,24 @@ class PathAnonymizer:
         # 建立全局映射，确保同一个敏感词在不同路径中替换为相同的占位符
         return [self.anonymize(p) for p in paths]
 
+    def _placeholder(self, part: str, index: int, path: str, i: int, total: int) -> str:
+        """生成占位符；若是真实文件且是最后一段，保留扩展名供 AI 判断类型。"""
+        placeholder = f"<DIR_{index}>"
+        if i == total - 1 and os.path.isfile(path):
+            suffix = Path(part).suffix
+            if suffix:
+                placeholder += suffix
+        return placeholder
+
     def is_blocked_extension(self, path: str) -> bool:
         """检查文件扩展名是否在云端发送黑名单中"""
+        name = Path(path).name.lower()
         ext = Path(path).suffix.lower()
-        return ext in self.BLOCKED_EXTENSIONS
+        return (
+            ext in self.BLOCKED_EXTENSIONS
+            or name in self.BLOCKED_NAMES
+            or name.startswith(".env.")
+        )
 
     def should_send_to_cloud(self, path: str, cloud_blocklist: list[str] | None = None) -> bool:
         """判断路径是否应该发往云端

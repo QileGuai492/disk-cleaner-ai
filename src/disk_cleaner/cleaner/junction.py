@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import stat as stat_module
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,77 +24,103 @@ class JunctionManager:
     """NTFS Junction（目录联接）管理器"""
 
     @staticmethod
+    def _create_link(source: Path, target: Path) -> tuple[bool, str]:
+        """只创建链接，不移动数据。"""
+        if os.name != "nt":
+            return False, "当前平台不支持 NTFS Junction"
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(source), str(target)],
+            capture_output=True,
+            text=True,
+            shell=False,
+        )
+        if result.returncode == 0:
+            return True, ""
+        message = (result.stderr or result.stdout or "").strip()
+        return False, message or f"mklink 退出码 {result.returncode}"
+
+    @staticmethod
     def create(source: str, target: str) -> JunctionResult:
-        """在 source 位置创建 Junction，指向 target
+        """在 source 位置创建 Junction，指向 target。
 
-        Args:
-            source: Junction 的创建位置（原始文件路径）
-            target: Junction 指向的实际位置
-
-        Returns:
-            JunctionResult
+        source 可以是空目录（会被替换为链接）；非空目录不会被自动合并，
+        请使用 relocate_directory 完成“移动 + 建链 + 失败回滚”。
         """
         source_path = Path(source)
         target_path = Path(target)
 
         if not target_path.exists():
             return JunctionResult(
-                source=str(source_path),
-                target=str(target_path),
-                action="failed",
-                success=False,
-                error="目标目录不存在",
+                source=str(source_path), target=str(target_path),
+                action="failed", success=False, error="目标目录不存在",
             )
+        if not target_path.is_dir():
+            return JunctionResult(
+                source=str(source_path), target=str(target_path),
+                action="failed", success=False, error="目标不是目录",
+            )
+
+        removed_empty_source = False
+        if source_path.exists():
+            if JunctionManager.is_junction(str(source_path)):
+                return JunctionResult(
+                    source=str(source_path), target=str(target_path),
+                    action="failed", success=False, error="路径已是 Junction",
+                )
+            if not source_path.is_dir():
+                return JunctionResult(
+                    source=str(source_path), target=str(target_path),
+                    action="failed", success=False,
+                    error="源路径是文件，不能创建目录 Junction",
+                )
+            try:
+                if any(source_path.iterdir()):
+                    return JunctionResult(
+                        source=str(source_path), target=str(target_path),
+                        action="failed", success=False,
+                        error="源目录非空；为避免数据丢失，请使用 relocate_directory",
+                    )
+            except OSError as e:
+                return JunctionResult(
+                    source=str(source_path), target=str(target_path),
+                    action="failed", success=False, error=f"无法读取源目录: {e}",
+                )
+            try:
+                source_path.rmdir()
+                removed_empty_source = True
+            except OSError as e:
+                return JunctionResult(
+                    source=str(source_path), target=str(target_path),
+                    action="failed", success=False, error=f"无法移除空源目录: {e}",
+                )
 
         try:
-            # 如果 source 存在且不是 junction，先备份
-            if source_path.exists():
-                if JunctionManager.is_junction(str(source_path)):
-                    return JunctionResult(
-                        source=str(source_path),
-                        target=str(target_path),
-                        action="failed",
-                        success=False,
-                        error="路径已是 Junction",
-                    )
-                # 不是 junction，但是有文件——移动到 target
-                shutil.move(str(source_path), str(target_path))
-
-            # 创建 Junction: mklink /J <link> <target>
-            result = subprocess.run(
-                ["cmd", "/c", "mklink", "/J", str(source_path), str(target_path)],
-                capture_output=True,
-                text=True,
-                shell=False,
-            )
-            if result.returncode == 0:
-                return JunctionResult(
-                    source=str(source_path),
-                    target=str(target_path),
-                    action="created",
-                    success=True,
-                )
-            return JunctionResult(
-                source=str(source_path),
-                target=str(target_path),
-                action="failed",
-                success=False,
-                error=result.stderr.strip(),
-            )
+            ok, error = JunctionManager._create_link(source_path, target_path)
         except Exception as e:
+            ok, error = False, str(e)
+
+        if ok:
             return JunctionResult(
-                source=str(source_path),
-                target=str(target_path),
-                action="failed",
-                success=False,
-                error=str(e),
+                source=str(source_path), target=str(target_path),
+                action="created", success=True,
             )
+
+        # 创建失败：恢复被移除的空目录，保持原状
+        if removed_empty_source:
+            try:
+                source_path.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+        return JunctionResult(
+            source=str(source_path), target=str(target_path),
+            action="failed", success=False, error=error,
+        )
 
     @staticmethod
     def remove(junction_path: str) -> JunctionResult:
         """删除 Junction（不删除目标内容）"""
         path = Path(junction_path)
-        if not path.exists():
+        if not os.path.lexists(str(path)):
             return JunctionResult(
                 source=str(path), target="", action="failed",
                 success=False, error="路径不存在",
@@ -122,25 +149,16 @@ class JunctionManager:
 
     @staticmethod
     def is_junction(path: str) -> bool:
-        """检查路径是否是 NTFS Junction"""
+        """检查路径是否是 NTFS Junction / 重解析点。"""
         try:
-            path_obj = Path(path)
-            if not path_obj.exists():
-                return False
-            # Junction 的 stat 显示为目录但 `os.path.islink` 检查 reparse point
-            # Windows: 检查 reparse point 属性
-            import stat as st
-
-            file_stat = path_obj.stat()
-            # ST_REPARSE_TAG = 0x20000000 (not in Python's stat module directly)
-            # Use os.path.islink check for symlinks, then directory check for junctions
-            return path_obj.is_dir() and bool(
-                os.path.islink(path) or path_obj.stat().st_file_attributes & 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
-                if hasattr(path_obj.stat(), "st_file_attributes")
-                else False
-            )
-        except Exception:
+            st = os.lstat(path)
+        except OSError:
             return False
+        attrs = getattr(st, "st_file_attributes", 0)
+        reparse = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if not (attrs & reparse) and not os.path.islink(path):
+            return False
+        return stat_module.S_ISDIR(st.st_mode) or os.path.islink(path)
 
     @staticmethod
     def relocate_directory(
@@ -148,15 +166,9 @@ class JunctionManager:
         target_base: str,
         auto_junction: bool = True,
     ) -> JunctionResult:
-        """将目录搬迁到 target_base 下，可选创建 Junction
+        """将目录搬迁到 target_base 下，可选创建 Junction。
 
-        Args:
-            source: 要搬迁的目录
-            target_base: 目标基础路径（如 D:\\Relocated）
-            auto_junction: 是否自动在原位置创建 Junction
-
-        Returns:
-            JunctionResult
+        采用“移动 → 建链 → 失败回滚”的顺序；任何一步失败都会把目录移回原位置。
         """
         source_path = Path(source)
         if not source_path.exists():
@@ -164,31 +176,76 @@ class JunctionManager:
                 source=str(source_path), target="",
                 action="failed", success=False, error="源目录不存在",
             )
+        if not source_path.is_dir():
+            return JunctionResult(
+                source=str(source_path), target="",
+                action="failed", success=False, error="源路径不是目录",
+            )
+        if not source_path.name:
+            return JunctionResult(
+                source=str(source_path), target="",
+                action="failed", success=False, error="不能搬迁盘符根目录",
+            )
 
         target_base_path = Path(target_base)
         target_base_path.mkdir(parents=True, exist_ok=True)
+        target_path = target_base_path / source_path.name
 
-        # 构建目标路径
-        rel_name = source_path.name
-        target_path = target_base_path / rel_name
+        if target_path.exists():
+            return JunctionResult(
+                source=str(source_path), target=str(target_path),
+                action="failed", success=False, error="目标路径已存在，请先确认",
+            )
+        try:
+            if os.path.commonpath([
+                os.path.abspath(str(target_path)),
+                os.path.abspath(str(source_path)),
+            ]) == os.path.abspath(str(source_path)):
+                return JunctionResult(
+                    source=str(source_path), target=str(target_path),
+                    action="failed", success=False, error="目标路径不能位于源目录内部",
+                )
+        except ValueError:
+            pass
 
         try:
-            # 移动目录
             shutil.move(str(source_path), str(target_path))
-
-            if auto_junction:
-                return JunctionManager.create(source, str(target_path))
-            return JunctionResult(
-                source=str(source_path),
-                target=str(target_path),
-                action="relocated",
-                success=True,
-            )
         except Exception as e:
             return JunctionResult(
-                source=str(source_path),
-                target=str(target_path),
-                action="failed",
-                success=False,
-                error=str(e),
+                source=str(source_path), target=str(target_path),
+                action="failed", success=False, error=f"移动失败: {e}",
             )
+
+        if not auto_junction:
+            return JunctionResult(
+                source=str(source_path), target=str(target_path),
+                action="relocated", success=True,
+            )
+
+        try:
+            ok, error = JunctionManager._create_link(source_path, target_path)
+        except Exception as e:
+            ok, error = False, str(e)
+
+        if ok:
+            return JunctionResult(
+                source=str(source_path), target=str(target_path),
+                action="created", success=True,
+            )
+
+        # 回滚：把已移动的目录搬回原位置
+        try:
+            if os.path.lexists(str(source_path)):
+                # 只允许清掉空目录/残留链接，绝不递归删除
+                os.rmdir(str(source_path))
+            shutil.move(str(target_path), str(source_path))
+            rollback = "已回滚"
+        except Exception as rollback_error:
+            rollback = (
+                f"回滚失败，请手动将 {target_path} 移回 {source_path}：{rollback_error}"
+            )
+        return JunctionResult(
+            source=str(source_path), target=str(target_path),
+            action="failed", success=False,
+            error=f"{error}；{rollback}",
+        )

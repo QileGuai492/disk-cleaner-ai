@@ -40,8 +40,40 @@ class FileAnalysisOutput:
         return self.decision in ("safe_to_delete", "likely_safe") and self.confidence >= 0.80
 
 
+VALID_DECISIONS = frozenset({
+    "safe_to_delete", "likely_safe", "needs_review", "keep", "critical",
+})
+
+
+def _safe_decision(value) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in VALID_DECISIONS:
+            return normalized
+    return "needs_review"
+
+
+def _safe_confidence(value, default: float = 0.3) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, confidence))
+
+
+def _safe_text(value, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
+def _safe_risk(value) -> str:
+    risk = _safe_text(value, "unknown").strip().lower()
+    return risk if risk in ("none", "low", "medium", "high", "unknown") else "unknown"
+
+
 def parse_ai_response(text: str, is_cluster: bool = False) -> FileAnalysisOutput:
-    """从 AI 响应文本中解析分析结果"""
+    """从 AI 响应文本中解析分析结果（对模型输出做白名单与类型校验）"""
     if not text or not text.strip():
         return FileAnalysisOutput(
             decision="needs_review", confidence=0.0, reason="AI 返回空响应", risk="unknown"
@@ -54,51 +86,59 @@ def parse_ai_response(text: str, is_cluster: bool = False) -> FileAnalysisOutput
         json_text = json_match.group(1).strip()
     elif text.strip().startswith("{"):
         json_text = text.strip()
-    else:
-        # 可能只是纯文本响应
-        pass
 
+    truncated = False
     try:
         data = json.loads(json_text)
     except json.JSONDecodeError:
+        data = None
         # 尝试补全截断的 JSON（max_tokens 不够时会被截断）
         if json_text.startswith("{") and not json_text.rstrip().endswith("}"):
-            # 找最后一个完整的键值对，手动闭合
             fixed = re.sub(r',\s*"[^"]*"\s*:\s*"[^"]*$', "", json_text.rstrip().rstrip(","))
             fixed += "}"
             try:
                 data = json.loads(fixed)
+                truncated = True
             except json.JSONDecodeError:
-                pass
-            else:
-                if "decision" in data:
-                    return FileAnalysisOutput(
-                        decision=data.get("decision", "needs_review"),
-                        confidence=float(data.get("confidence", 0.3)),
-                        reason=data.get("reason", "") + "（响应被截断）",
-                        risk=data.get("risk", "unknown"),
-                    )
+                data = None
+        if data is None:
+            return FileAnalysisOutput(
+                decision="needs_review",
+                confidence=0.30,
+                reason=f"AI 响应格式异常: {text[:200]}",
+                risk="unknown",
+            )
+
+    if not isinstance(data, dict):
         return FileAnalysisOutput(
             decision="needs_review",
             confidence=0.30,
-            reason=f"AI 响应格式异常: {text[:200]}",
+            reason=f"AI 响应不是 JSON 对象: {text[:200]}",
             risk="unknown",
         )
 
+    suffix = "（响应被截断）" if truncated else ""
+
     if is_cluster:
+        raw_warnings = data.get("warnings", [])
+        warnings = [str(w) for w in raw_warnings] if isinstance(raw_warnings, list) else []
+        try:
+            reclaimable = float(data.get("total_reclaimable_mb", 0.0))
+        except (TypeError, ValueError):
+            reclaimable = 0.0
         return FileAnalysisOutput(
-            decision=data.get("cluster_decision", "needs_review"),
-            confidence=0.80,
-            reason=data.get("cluster_reason", ""),
-            total_reclaimable_mb=data.get("total_reclaimable_mb", 0.0),
-            warnings=data.get("warnings", []),
+            decision=_safe_decision(data.get("cluster_decision", data.get("decision"))),
+            confidence=_safe_confidence(data.get("confidence"), 0.80),
+            reason=_safe_text(data.get("cluster_reason", data.get("reason"))) + suffix,
+            total_reclaimable_mb=max(0.0, reclaimable),
+            warnings=warnings,
         )
 
     return FileAnalysisOutput(
-        decision=data.get("decision", "needs_review"),
-        confidence=float(data.get("confidence", 0.5)),
-        reason=data.get("reason", ""),
-        risk=data.get("risk", "unknown"),
+        decision=_safe_decision(data.get("decision")),
+        confidence=_safe_confidence(data.get("confidence"), 0.5),
+        reason=_safe_text(data.get("reason")) + suffix,
+        risk=_safe_risk(data.get("risk")),
     )
 
 
@@ -182,8 +222,12 @@ def build_cluster_prompt(
     return "\n".join(lines)
 
 
+class AIUnavailableError(RuntimeError):
+    """AI 后端不可用，且不能伪造结果时抛出。"""
+
+
 class AIProvider:
-    """AI 后端统一接口——含重试、速率限制、降级"""
+    """AI 后端统一接口——含重试、速率限制、显式失败"""
 
     SYSTEM_PROMPT = (
         "你是一个磁盘清理专家。根据文件路径、大小、类型、修改时间等信息，"
@@ -220,28 +264,42 @@ class AIProvider:
         }
 
     def _get_key(self) -> str:
-        """获取 API Key：优先用传入的，否则从 KeyStore 读取"""
+        """获取 API Key：传入值 → KeyStore → 环境变量。"""
         if self.api_key:
             return self.api_key
         try:
             from disk_cleaner.db.keystore import KeyStore
-            return KeyStore().get_key(self.provider_name) or ""
+            stored = KeyStore().get_key(self.provider_name) or ""
+            if stored:
+                return stored
         except Exception:
-            return ""
+            pass
+        env_names = {
+            "openai": "OPENAI_API_KEY",
+            "claude": "ANTHROPIC_API_KEY",
+            "deepseek": "DEEPSEEK_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+        }
+        return os.environ.get(env_names.get(self.provider_name, ""), "")
 
     def analyze(self, prompt: str) -> str:
-        """发送 prompt，带重试和速率限制"""
+        """发送 prompt；失败时抛 AIUnavailableError，绝不伪造 AI 结果。"""
+        if self.provider_name == "local":
+            self._total_calls += 1
+            return self._mock_analyze(prompt)
+
         if not self.api_key:
             self.api_key = self._get_key()
+
+        if self.provider_name in ("openai", "claude", "deepseek", "gemini") and not self.api_key:
+            raise AIUnavailableError(f"{self.provider_name} 未配置 API Key")
 
         self._rate_limit()
         last_error = ""
 
         for attempt in range(self.max_retries):
             try:
-                if self.provider_name == "local":
-                    result = self._mock_analyze(prompt)
-                elif self.provider_name == "openai":
+                if self.provider_name == "openai":
                     result = self._call_openai(prompt)
                 elif self.provider_name == "ollama":
                     result = self._call_ollama(prompt)
@@ -252,25 +310,40 @@ class AIProvider:
                 elif self.provider_name == "deepseek":
                     result = self._call_deepseek(prompt)
                 else:
-                    result = self._mock_analyze(prompt)
+                    raise AIUnavailableError(f"未知的 AI 后端: {self.provider_name}")
 
-                if result:
+                if result and result.strip():
                     self._total_calls += 1
                     return result
+                last_error = "空响应"
 
+            except AIUnavailableError:
+                raise
             except Exception as e:
                 last_error = str(e)
+                if self._is_non_retryable(e):
+                    raise AIUnavailableError(
+                        f"{self.provider_name} 调用失败（不可重试）: {last_error}"
+                    ) from e
                 if attempt < self.max_retries - 1:
                     wait = 2 ** attempt  # 指数退避: 1s, 2s, 4s
                     time.sleep(wait)
 
-        # 所有重试失败，降级
-        return json.dumps({
-            "decision": "needs_review",
-            "confidence": 0.0,
-            "reason": f"API 调用失败（{self.max_retries} 次重试）: {last_error}",
-            "risk": "unknown",
-        })
+        raise AIUnavailableError(
+            f"{self.provider_name} 调用失败（{self.max_retries} 次重试）: {last_error}"
+        )
+
+    @staticmethod
+    def _is_non_retryable(exc: Exception) -> bool:
+        """认证/权限/模型不存在/参数错误无需重试。"""
+        name = type(exc).__name__.lower()
+        if any(key in name for key in ("authentication", "permissiondenied", "notfound", "badrequest")):
+            return True
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+        return status in (400, 401, 403, 404)
 
     def analyze_batch(self, prompts: list[str]) -> list[str]:
         """批量分析，自动速率限制"""
@@ -292,7 +365,12 @@ class AIProvider:
 
     def _call_openai(self, prompt: str) -> str:
         """调用 OpenAI API"""
-        import openai
+        try:
+            import openai
+        except ImportError as e:
+            raise AIUnavailableError("openai 未安装") from e
+        if not self.api_key:
+            raise AIUnavailableError("openai 未配置 API Key")
         client = openai.OpenAI(api_key=self.api_key)
         response = client.chat.completions.create(
             model=self.model,
@@ -312,17 +390,22 @@ class AIProvider:
                 cost = response.usage.prompt_tokens * 0.15 / 1_000_000
                 cost += response.usage.completion_tokens * 0.60 / 1_000_000
                 self._budget_used += cost
+        if not content.strip():
+            raise AIUnavailableError("OpenAI 返回空响应")
         return content
 
     def _call_deepseek(self, prompt: str) -> str:
         """调用 DeepSeek API（兼容 OpenAI SDK）
         模型: deepseek-v4-flash（高性价比）/ deepseek-v4-pro（深度推理）
         """
-        import openai
+        try:
+            import openai
+        except ImportError as e:
+            raise AIUnavailableError("openai 未安装") from e
 
         key = self.api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         if not key:
-            return self._mock_analyze(prompt)
+            raise AIUnavailableError("deepseek 未配置 API Key")
 
         client = openai.OpenAI(
             api_key=key,
@@ -337,65 +420,87 @@ class AIProvider:
             temperature=0.1,
             max_tokens=500,
         )
-        return response.choices[0].message.content or ""
+        content = response.choices[0].message.content or ""
+        if not content.strip():
+            raise AIUnavailableError("DeepSeek 返回空响应")
+        return content
 
     def _call_gemini(self, prompt: str) -> str:
         """调用 Gemini API"""
         try:
             import requests
-            key = self.api_key or os.environ.get("GEMINI_API_KEY", "")
-            if not key:
-                return self._mock_analyze(prompt)
-            resp = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
-                params={"key": key},
-                json={
-                    "contents": [{"parts": [{"text": self.SYSTEM_PROMPT + "\n\n" + prompt}]}],
-                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": 500},
-                },
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            return self._mock_analyze(prompt)
-        except Exception:
-            return self._mock_analyze(prompt)
+        except ImportError as e:
+            raise AIUnavailableError("requests 未安装") from e
+
+        key = self.api_key or os.environ.get("GEMINI_API_KEY", "")
+        if not key:
+            raise AIUnavailableError("gemini 未配置 API Key")
+
+        resp = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
+            params={"key": key},
+            json={
+                "contents": [{"parts": [{"text": self.SYSTEM_PROMPT + "\n\n" + prompt}]}],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 500},
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise AIUnavailableError(f"Gemini HTTP {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        try:
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise AIUnavailableError("Gemini 响应结构异常") from e
+        if not text.strip():
+            raise AIUnavailableError("Gemini 返回空响应")
+        return text
 
     def _call_claude(self, prompt: str) -> str:
         """调用 Claude API"""
         try:
             import anthropic
-            client = anthropic.Anthropic(api_key=self.api_key)
-            response = client.messages.create(
-                model=self.model,
-                max_tokens=500,
-                system=self.SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text
-        except ImportError:
-            return self._mock_analyze(prompt)
+        except ImportError as e:
+            raise AIUnavailableError("anthropic 未安装") from e
+        if not self.api_key:
+            raise AIUnavailableError("claude 未配置 API Key")
+
+        client = anthropic.Anthropic(api_key=self.api_key)
+        response = client.messages.create(
+            model=self.model,
+            max_tokens=500,
+            system=self.SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text if response.content else ""
+        if not text.strip():
+            raise AIUnavailableError("Claude 返回空响应")
+        return text
 
     def _call_ollama(self, prompt: str) -> str:
         """调用本地 Ollama 模型"""
-        import requests
+        try:
+            import requests
+        except ImportError as e:
+            raise AIUnavailableError("requests 未安装") from e
+
         try:
             # 快速检测 Ollama 是否在运行（只建连接，不实际推理）
             requests.get("http://localhost:11434/api/tags", timeout=1)
-        except Exception:
-            return self._mock_analyze(prompt)
-        try:
-            response = requests.post(
-                "http://localhost:11434/api/generate",
-                json={"model": self.model, "prompt": prompt, "stream": False},
-                timeout=5,
-            )
-            if response.status_code == 200:
-                return response.json().get("response", "")
-        except Exception:
-            pass
-        return self._mock_analyze(prompt)
+        except Exception as e:
+            raise AIUnavailableError("Ollama 未运行或不可访问") from e
+
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": self.model, "prompt": prompt, "stream": False},
+            timeout=5,
+        )
+        if response.status_code != 200:
+            raise AIUnavailableError(f"Ollama HTTP {response.status_code}: {response.text[:200]}")
+        text = response.json().get("response", "")
+        if not text.strip():
+            raise AIUnavailableError("Ollama 返回空响应")
+        return text
 
     def _mock_analyze(self, prompt: str) -> str:
         """离线降级分析——基于扩展名和路径的规则推断"""
