@@ -13,7 +13,7 @@ try:
     from importlib.metadata import version as _pkg_version
     _VERSION = _pkg_version("disk-cleaner")
 except Exception:
-    _VERSION = "0.6.1"
+    _VERSION = "0.6.2"
 
 from disk_cleaner.scanner.walker import FileInfo, scan_directory
 from disk_cleaner.analyzer.engine import AnalysisEngine
@@ -509,8 +509,13 @@ def check_deps(path: str):
         report = analyzer.analyze(path)
         refs = report.referrers
         exe_refs = [r for r in refs if r.lower().endswith(".exe")]
+        registry_refs = analyzer.find_registry_references(path)
         click.echo(f"\n扫描范围: {parent}")
         click.echo(f"已索引 PE 文件: {analyzer.get_stats()['pe_files']} 个")
+        if registry_refs:
+            click.echo(f"注册表引用: {len(registry_refs)} 处")
+            for item in registry_refs[:5]:
+                click.echo(f"  - {item['location']} / {item['value_name']}")
         if refs:
             click.echo(f"\n{report.dll_name} 被以下文件引用:")
             for r in refs:
@@ -520,7 +525,7 @@ def check_deps(path: str):
                 "存在引用，不建议删除。"
             )
         else:
-            click.echo(f"\n在已扫描的范围内未发现 {report.dll_name} 的引用。")
+            click.echo(f"\n在已扫描的范围内未发现 {report.dll_name} 的 PE 引用。")
             click.echo("⚠ 这不等于安全：引用者可能位于其他目录、注册表、计划任务或服务中。")
             click.echo("   请勿仅凭此结果删除文件；建议先备份，或用完整扫描工具复核。")
     else:

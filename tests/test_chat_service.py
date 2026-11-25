@@ -112,6 +112,19 @@ def test_invalid_ai_response_falls_back_to_local():
     assert answer["source"] == "local"
 
 
+def test_what_if_answer_mentions_backup():
+    target = "C:/Temp/a.tmp"
+    service = ChatService()
+    context = service.create_session(
+        [_result(target, "safe_to_delete", reason="临时文件")],
+        scope="file",
+        target=target,
+    )
+    answer = service.answer(context.session_id, "如果删了会怎样？")
+    assert "如果删除" in answer["answer"]
+    assert "备份" in answer["answer"]
+
+
 def test_session_keeps_short_history():
     target = "C:/Temp/a.tmp"
     service = ChatService()

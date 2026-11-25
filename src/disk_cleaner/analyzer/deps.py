@@ -81,6 +81,52 @@ class DependencyAnalyzer:
         referrers = self.get_referrers(dll_name)
         return DependencyReport(dll_name=dll_name, referrers=list(referrers))
 
+    @staticmethod
+    def find_registry_references(target: str) -> list[dict]:
+        """扫描常见注册表启动/卸载项中对目标路径的引用。"""
+        if os.name != "nt":
+            return []
+        import winreg
+
+        target_lower = os.path.abspath(target).lower()
+        name = os.path.basename(target).lower()
+        locations = [
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\RunOnce"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ]
+        found: list[dict] = []
+        for root, location in locations:
+            try:
+                key = winreg.OpenKey(root, location)
+            except OSError:
+                continue
+            try:
+                for index in range(winreg.QueryInfoKey(key)[1]):
+                    try:
+                        value_name, value, _ = winreg.EnumValue(key, index)
+                    except OSError:
+                        continue
+                    if not isinstance(value, str):
+                        continue
+                    lowered = value.lower()
+                    if target_lower in lowered or (name and name in lowered and len(name) >= 6):
+                        found.append({
+                            "location": location,
+                            "value_name": value_name,
+                            "value": value,
+                        })
+                        if len(found) >= 50:
+                            return found
+            finally:
+                try:
+                    winreg.CloseKey(key)
+                except OSError:
+                    pass
+        return found
+
     def get_stats(self) -> dict:
         """获取统计信息"""
         return {

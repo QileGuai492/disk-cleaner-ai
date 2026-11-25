@@ -104,6 +104,33 @@ class SystemTray:
         def do_analyze():
             threading.Thread(target=_run_scan, daemon=True).start()
 
+        def do_open_gui(icon, item):
+            def _open():
+                import socket
+                import time
+                import webbrowser
+                try:
+                    from disk_cleaner.config import load_config
+                    port = load_config().gui.port
+                except Exception:
+                    port = 8765
+                probe = socket.socket()
+                probe.settimeout(0.2)
+                running = probe.connect_ex(("127.0.0.1", port)) == 0
+                probe.close()
+                if not running:
+                    try:
+                        from disk_cleaner.gui.app import start_gui
+                        threading.Thread(
+                            target=lambda: start_gui(port=port, open_browser=False),
+                            daemon=True,
+                        ).start()
+                        time.sleep(0.8)
+                    except Exception:
+                        pass
+                webbrowser.open(f"http://127.0.0.1:{port}")
+            threading.Thread(target=_open, daemon=True).start()
+
         def do_exit(icon, item):
             self.stop()
             icon.stop()
@@ -113,6 +140,7 @@ class SystemTray:
         menu = pystray.Menu(
             pystray.MenuItem("立即扫描", do_scan, default=True),
             pystray.MenuItem("扫描 C 盘", do_analyze),
+            pystray.MenuItem("打开主界面", do_open_gui),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", do_exit),
         )

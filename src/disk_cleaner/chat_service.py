@@ -419,6 +419,21 @@ class ChatService:
             lines.append("风险：")
             for risk in context.risks[:5]:
                 lines.append(f"- {risk}")
+        if any(key in question for key in ("如果删", "删了会怎样", "会怎样", "影响")):
+            lines.append("")
+            lines.append("如果删除：")
+            if context.clean_items:
+                lines.append(
+                    f"- {len(context.clean_items)} 个可清理项会默认进入备份区，"
+                    "可在“恢复备份”中找回；同分区备份不会立即释放空间。"
+                )
+            if context.keep_items:
+                lines.append(
+                    f"- 其中 {len(context.keep_items)} 个是用户数据/程序文件，不建议删除；"
+                    "删除后可能无法恢复。"
+                )
+            if not context.clean_items and not context.keep_items:
+                lines.append("- 当前证据不足，无法可靠预测删除后果。")
         lines.append("")
         lines.append("建议：")
         if context.clean_items:
