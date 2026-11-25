@@ -19,12 +19,19 @@ class PathAnonymizer:
         "工资", "合同", "简历", "身份证",
     }
 
-    def __init__(self, level: str = "strict"):
+    def __init__(self, level: str = "strict", blocked_extensions: list[str] | None = None):
         """
         Args:
             level: strict（最大脱敏）/ moderate（中等）/ minimal（最小）
+            blocked_extensions: 额外的禁止上云扩展名
         """
         self.level = level
+        self.blocked_extensions = set(self.BLOCKED_EXTENSIONS)
+        if blocked_extensions:
+            self.blocked_extensions.update(
+                ext.lower() if ext.startswith(".") else f".{ext.lower()}"
+                for ext in blocked_extensions
+            )
 
     def anonymize(self, path: str) -> str:
         """对单个路径进行脱敏"""
@@ -86,7 +93,7 @@ class PathAnonymizer:
         name = Path(path).name.lower()
         ext = Path(path).suffix.lower()
         return (
-            ext in self.BLOCKED_EXTENSIONS
+            ext in self.blocked_extensions
             or name in self.BLOCKED_NAMES
             or name.startswith(".env.")
         )

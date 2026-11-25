@@ -1,5 +1,6 @@
 """分析引擎集成测试"""
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -148,6 +149,29 @@ class TestRuleLearningAndForce:
         events = list(engine.analyze_directory_stream(str(temp_dir), top_n=20, force=True))
         results = [e["result"] for e in events if e["type"] == "result"]
         assert any(r.get("source") == "rule" for r in results)
+
+
+class TestEngineConfig:
+    """引擎读取统一配置。"""
+
+    def test_扫描上限来自配置文件(self, db, tmp_path, monkeypatch):
+        config_path = tmp_path / "config.json"
+        monkeypatch.setenv("DISK_CLEANER_CONFIG", str(config_path))
+
+        config_path.write_text(
+            json.dumps({
+                "scan": {"max_dirs": 123, "skip_symlinks": False},
+                "privacy": {"extension_blocklist": [".foo"]},
+                "ai": {"max_retries": 5, "rate_limit_rpm": 7},
+            }),
+            encoding="utf-8",
+        )
+        engine = AnalysisEngine(db, ai_provider="local")
+        assert engine.max_dirs == 123
+        assert engine.skip_symlinks is False
+        assert engine.ai_max_retries == 5
+        assert engine.ai_rate_limit_rpm == 7
+        assert engine.anonymizer.is_blocked_extension("test.foo") is True
 
 
 class TestEngineCacheIntegration:

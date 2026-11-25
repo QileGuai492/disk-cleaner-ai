@@ -6,6 +6,9 @@ import time
 from typing import Optional
 
 
+SCHEMA_VERSION = 2
+
+
 class Database:
     """数据库连接管理"""
 
@@ -71,7 +74,15 @@ class Database:
             created_at      INTEGER NOT NULL
         );
         """)
+        current_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if current_version < SCHEMA_VERSION:
+            # 现有表都用 CREATE TABLE IF NOT EXISTS，后续版本可在这里追加 ALTER。
+            self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self._conn.commit()
+
+    @property
+    def schema_version(self) -> int:
+        return int(self._conn.execute("PRAGMA user_version").fetchone()[0])
 
     def close(self) -> None:
         self._conn.close()

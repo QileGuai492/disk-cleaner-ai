@@ -9,6 +9,12 @@ from datetime import datetime
 
 import click
 
+try:
+    from importlib.metadata import version as _pkg_version
+    _VERSION = _pkg_version("disk-cleaner")
+except Exception:
+    _VERSION = "0.4.0"
+
 from disk_cleaner.scanner.walker import FileInfo, scan_directory
 from disk_cleaner.analyzer.engine import AnalysisEngine
 from disk_cleaner.db.models import Database
@@ -34,7 +40,7 @@ def _get_db_path() -> str:
 
 
 @click.group()
-@click.version_option(version="0.1.0", message="disk-cleaner v%(version)s")
+@click.version_option(version=_VERSION, message="disk-cleaner v%(version)s")
 def cli():
     """AI 驱动的磁盘清理工具"""
 
@@ -340,7 +346,12 @@ def backup(action: str, batch_id: str | None):
     """管理备份区"""
     from disk_cleaner.cleaner.executor import BackupManager
 
-    manager = BackupManager()
+    try:
+        from disk_cleaner.config import load_config
+        cfg = load_config()
+        manager = BackupManager(cfg.backup.dir, cfg.backup.retention_days)
+    except Exception:
+        manager = BackupManager()
 
     if action == "list":
         batches = manager.list_batches()
@@ -647,6 +658,11 @@ def schedule(action: str):
             return
         click.echo(f"定时扫描已启动（间隔 {sched.config.interval_hours} 小时，PID {proc.pid}）")
         click.echo(f"扫描路径: {', '.join(sched.config.scan_paths)}")
+        try:
+            from disk_cleaner.logging_utils import audit
+            audit("schedule_start", pid=proc.pid, paths=sched.config.scan_paths)
+        except Exception:
+            pass
 
     elif action == "daemon":
         if sched.is_daemon_running() and sched.read_pid() != os.getpid():
@@ -686,6 +702,11 @@ def schedule(action: str):
         sched.config.enabled = False
         sched._save_config()
         click.echo("定时扫描已停止" if stopped else "没有正在运行的定时扫描进程。")
+        try:
+            from disk_cleaner.logging_utils import audit
+            audit("schedule_stop", pid=pid, stopped=stopped)
+        except Exception:
+            pass
 
     elif action == "status":
         st = sched.status
@@ -708,15 +729,20 @@ def schedule(action: str):
 
 
 @cli.command()
-@click.option("--port", "-p", type=int, default=8765, help="Web 服务器端口")
+@click.option("--port", "-p", type=int, default=None, help="Web 服务器端口（默认读取配置）")
 @click.option("--no-browser", is_flag=True, default=False, help="不自动打开浏览器")
-def gui(port: int, no_browser: bool):
+def gui(port: int | None, no_browser: bool):
     """启动 Web 图形界面"""
     from disk_cleaner.gui.app import start_gui
+    from disk_cleaner.config import load_config
 
-    click.echo(f"启动 Web GUI 在 http://127.0.0.1:{port}")
+    try:
+        resolved_port = port if port is not None else load_config().gui.port
+    except Exception:
+        resolved_port = port or 8765
+    click.echo(f"启动 Web GUI 在 http://127.0.0.1:{resolved_port}")
     click.echo("按 Ctrl+C 停止")
-    start_gui(port=port, open_browser=not no_browser)
+    start_gui(port=port, open_browser=False if no_browser else None)
 
 
 @cli.command()
@@ -732,6 +758,24 @@ def tray():
 @cli.group()
 def config():
     """管理配置和 API Key"""
+
+
+@config.command("path")
+def config_path():
+    """显示配置文件路径"""
+    from disk_cleaner.config import get_config_path
+
+    click.echo(str(get_config_path()))
+
+
+@config.command("init")
+@click.option("--force", is_flag=True, default=False, help="覆盖已有配置")
+def config_init(force: bool):
+    """生成默认配置文件"""
+    from disk_cleaner.config import ensure_default_config
+
+    path = ensure_default_config(force=force)
+    click.echo(f"配置文件已生成: {path}")
 
 
 @config.command("set-key")
@@ -776,6 +820,11 @@ def config_delete_key(provider: str):
 
 
 def main():
+    try:
+        from disk_cleaner.logging_utils import setup_logging
+        setup_logging()
+    except Exception:
+        pass
     cli()
 
 

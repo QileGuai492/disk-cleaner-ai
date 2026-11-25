@@ -34,6 +34,11 @@ class AnalysisEngine:
         ai_model: str = "qwen2.5:1.5b",
         api_key: str = "",
         cloud_blocklist: list[str] | None = None,
+        privacy_level: str | None = None,
+        max_dirs: int | None = None,
+        skip_symlinks: bool | None = None,
+        ai_max_retries: int | None = None,
+        ai_rate_limit_rpm: int | None = None,
     ):
         self.db = db
         self.cache = AnalysisCache(db)
@@ -45,8 +50,38 @@ class AnalysisEngine:
         self.ai_provider = ai_provider
         self.ai_model = ai_model
         self.api_key = api_key
-        self.anonymizer = PathAnonymizer(level="strict")
+        config = None
+        if (
+            cloud_blocklist is None or privacy_level is None or max_dirs is None
+            or skip_symlinks is None or ai_max_retries is None or ai_rate_limit_rpm is None
+        ):
+            try:
+                from disk_cleaner.config import load_config
+                config = load_config()
+                if cloud_blocklist is None:
+                    cloud_blocklist = config.ai.cloud_blocklist
+                if privacy_level is None:
+                    privacy_level = config.privacy.level
+                if max_dirs is None:
+                    max_dirs = config.scan.max_dirs
+                if skip_symlinks is None:
+                    skip_symlinks = config.scan.skip_symlinks
+                if ai_max_retries is None:
+                    ai_max_retries = config.ai.max_retries
+                if ai_rate_limit_rpm is None:
+                    ai_rate_limit_rpm = config.ai.rate_limit_rpm
+            except Exception:
+                pass
+        self.ai_max_retries = ai_max_retries if ai_max_retries is not None else 3
+        self.ai_rate_limit_rpm = ai_rate_limit_rpm if ai_rate_limit_rpm is not None else 30
+        blocked_extensions = config.privacy.extension_blocklist if config is not None else None
+        self.anonymizer = PathAnonymizer(
+            level=privacy_level or "strict",
+            blocked_extensions=blocked_extensions,
+        )
         self.cloud_blocklist = cloud_blocklist or []
+        self.max_dirs = max_dirs if max_dirs is not None else 5000
+        self.skip_symlinks = True if skip_symlinks is None else bool(skip_symlinks)
         self._ai: AIProvider | None = None
         self._local_ai = AIProvider.create("local", model="heuristic")
         self._stats = self._new_stats()
@@ -116,7 +151,13 @@ class AnalysisEngine:
     @property
     def ai(self) -> AIProvider:
         if self._ai is None:
-            self._ai = AIProvider.create(self.ai_provider, api_key=self.api_key, model=self.ai_model)
+            self._ai = AIProvider.create(
+                self.ai_provider,
+                api_key=self.api_key,
+                model=self.ai_model,
+                max_retries=self.ai_max_retries,
+                rate_limit_rpm=self.ai_rate_limit_rpm,
+            )
         return self._ai
 
     @property
@@ -158,7 +199,10 @@ class AnalysisEngine:
     ) -> list[dict]:
         """分析目录中的所有文件，返回分析结果列表"""
         self._begin_run()
-        file_infos = scan_directory(path, top_n=top_n, recursive=recursive)
+        file_infos = scan_directory(
+            path, top_n=top_n, recursive=recursive,
+            max_dirs=self.max_dirs, skip_symlinks=self.skip_symlinks,
+        )
         self._stats["total"] = len(file_infos)
 
         if not file_infos:
@@ -245,7 +289,10 @@ class AnalysisEngine:
             yield {"type": "result", "current": 1, "total": 1, "result": result}
             return
 
-        file_infos = scan_directory(path, top_n=top_n, recursive=recursive)
+        file_infos = scan_directory(
+            path, top_n=top_n, recursive=recursive,
+            max_dirs=self.max_dirs, skip_symlinks=self.skip_symlinks,
+        )
         self._stats["total"] = len(file_infos)
         total = len(file_infos)
 
@@ -305,7 +352,10 @@ class AnalysisEngine:
 
     def relocate_analysis(self, path: str) -> list[dict]:
         """搬迁分析——识别可搬到 D 盘的大文件"""
-        file_infos = scan_directory(path, top_n=100, min_size=10 * 1024 * 1024)
+        file_infos = scan_directory(
+            path, top_n=100, min_size=10 * 1024 * 1024,
+            max_dirs=self.max_dirs, skip_symlinks=self.skip_symlinks,
+        )
         results: list[dict] = []
         for fi in file_infos:
             if any(sys_dir in fi.path.lower() for sys_dir in ["\\windows\\", "\\system32\\", "\\winsxs\\"]):
@@ -394,6 +444,11 @@ class AnalysisEngine:
             response = self.ai.analyze(prompt)
         except AIUnavailableError as e:
             self._stats["degraded"] += 1
+            try:
+                from disk_cleaner.logging_utils import get_logger
+                get_logger("engine").warning("AI 不可用，降级为本地规则: %s (%s)", fi.path, e)
+            except Exception:
+                pass
             return self._analyze_local(fi, f"AI 不可用：{e}", source="degraded")
 
         output = parse_ai_response(response)

@@ -25,6 +25,9 @@ class TestDatabase:
     def test_数据库文件创建(self, db):
         assert os.path.exists(db.path)
 
+    def test_schema_version(self, db):
+        assert db.schema_version >= 2
+
     def test_表结构创建(self, db):
         tables = db._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"

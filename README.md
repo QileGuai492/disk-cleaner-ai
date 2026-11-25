@@ -286,15 +286,56 @@ disk-cleaner check-deps <要搬迁的目录>
 # 3. 确认后手动搬迁（当前版本自动搬迁待实现）
 ```
 
+## 配置文件
+
+```bash
+disk-cleaner config init      # 生成 ~/.disk-cleaner/config.json
+disk-cleaner config path      # 显示配置文件路径
+```
+
+常用配置（JSON，未写的字段使用默认值）：
+
+```json
+{
+  "backup": { "dir": "~/disk-cleaner-backup", "retention_days": 30 },
+  "scan": { "max_dirs": 5000, "skip_symlinks": true },
+  "ai": {
+    "provider": "local",
+    "model": "",
+    "max_retries": 3,
+    "rate_limit_rpm": 30,
+    "cloud_blocklist": []
+  },
+  "privacy": { "level": "strict" },
+  "gui": { "port": 8765, "open_browser": true },
+  "monitor": {
+    "min_file_size_mb": 10,
+    "cooldown_seconds": 3,
+    "max_alerts_per_hour": 10,
+    "max_files_per_scan": 10000
+  },
+  "log": { "level": "INFO" }
+}
+```
+
+配置文件损坏时，CLI/GUI 会回退到默认值；可用 `disk-cleaner config init --force` 重新生成。
+
 ## 数据目录
 
 所有数据存储在 `~/.disk-cleaner/`：
 ```
 ~/.disk-cleaner/
-├── cache.db          # AI 分析缓存 + 规则库 + 扫描记录
-├── schedule.json     # 定时任务配置
+├── cache.db             # AI 分析缓存 + 规则库 + 扫描/清理记录
+├── config.json          # 统一配置
+├── schedule.json        # 定时任务配置
+├── schedule_state.json  # 上次/下次扫描时间
+├── scheduler.pid        # 定时进程 PID
+├── last_scan.json       # 最近一次定时扫描摘要
+├── logs/
+│   ├── disk-cleaner.log # 轮转日志
+│   └── audit.jsonl      # 清理/搬迁审计记录
 └── credentials/
-    └── keys.enc      # API Key（Windows DPAPI 加密）
+    └── keys.enc         # API Key（Windows DPAPI 加密）
 ```
 
 备份区默认在 `~/disk-cleaner-backup/`；每次执行清理前会自动清理过期批次（默认 30 天）。

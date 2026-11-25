@@ -11,6 +11,7 @@ from typing import Optional
 
 from disk_cleaner.cleaner.plan import CleanPlan
 from disk_cleaner.cleaner.safety import SafetyPolicy
+from disk_cleaner.config import ConfigError, load_config
 
 
 @dataclass
@@ -28,10 +29,10 @@ class CleanResult:
 class BackupManager:
     """安全模式——待清理文件先移到备份区，N 天后自动删除"""
 
-    def __init__(self, backup_root: str, retention_days: int = 30):
-        self.backup_root = Path(backup_root)
+    def __init__(self, backup_root: str = "~/disk-cleaner-backup", retention_days: int = 30):
+        self.backup_root = Path(os.path.expanduser(backup_root))
         self.backup_root.mkdir(parents=True, exist_ok=True)
-        self.retention_days = retention_days
+        self.retention_days = max(1, int(retention_days))
 
     def create_batch(self, label: str = "") -> str:
         """创建新备份批次，返回批次 ID"""
@@ -208,11 +209,24 @@ class CleanExecutor:
 
     def __init__(
         self,
-        backup_dir: str = "~/disk-cleaner-backup",
+        backup_dir: str | None = None,
         policy: SafetyPolicy | None = None,
+        retention_days: int | None = None,
     ):
-        self.backup_dir = os.path.expanduser(backup_dir)
-        self.backup_manager = BackupManager(self.backup_dir)
+        if backup_dir is None or retention_days is None:
+            try:
+                config = load_config()
+                if backup_dir is None:
+                    backup_dir = config.backup.dir
+                if retention_days is None:
+                    retention_days = config.backup.retention_days
+            except ConfigError:
+                pass
+        self.backup_dir = os.path.expanduser(backup_dir or "~/disk-cleaner-backup")
+        self.backup_manager = BackupManager(
+            self.backup_dir,
+            retention_days=retention_days if retention_days is not None else 30,
+        )
         self.policy = policy or SafetyPolicy()
         self._keep_patterns: list[str] = []
         self.last_batch_id = ""
@@ -375,6 +389,23 @@ class CleanExecutor:
             batch_id = ""
 
         self.last_batch_id = batch_id
+        try:
+            from disk_cleaner.logging_utils import audit
+            success = [r for r in results if r.success]
+            audit(
+                "clean",
+                plan_id=plan.plan_id,
+                mode=plan.mode,
+                success=len(success),
+                failed=len(results) - len(success),
+                moved_bytes=sum(r.bytes_freed for r in success if r.action == "moved_to_backup"),
+                freed_bytes=sum(r.bytes_freed for r in success if r.action == "permanently_deleted"),
+                batch_id=batch_id,
+                paths=plan.paths[:50],
+                rejected=plan.rejected[:20],
+            )
+        except Exception:
+            pass
         return results
 
     def clean(

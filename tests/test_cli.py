@@ -130,6 +130,22 @@ class TestStatsRecording:
         assert "总扫描次数: 1" in stats_result.output
 
 
+class TestConfigCommands:
+    """统一配置 CLI。"""
+
+    def test_配置初始化与路径(self, runner, tmp_path, monkeypatch):
+        path = tmp_path / "config.json"
+        monkeypatch.setenv("DISK_CLEANER_CONFIG", str(path))
+
+        result = runner.invoke(cli, ["config", "init"])
+        assert result.exit_code == 0
+        assert path.exists()
+
+        result = runner.invoke(cli, ["config", "path"])
+        assert result.exit_code == 0
+        assert str(path) in result.output
+
+
 class TestCLIGeneral:
     """通用 CLI 测试"""
 
