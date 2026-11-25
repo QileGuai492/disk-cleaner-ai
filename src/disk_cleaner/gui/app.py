@@ -1,13 +1,16 @@
 """轻量 Web GUI——内置 HTTP 服务 + 单页应用"""
 
+import html as html_module
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+from urllib.parse import parse_qs, urlparse
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True  # Ctrl+C 时自动杀掉所有请求线程
@@ -202,11 +205,12 @@ td a:hover{text-decoration:underline}
 </div>
 
 <script>
+const DC_TOKEN = "__DC_TOKEN__";
 let _busy = false, _ctrl = null;
 const $=id=>document.getElementById(id);
 
 async function api(path, data) {
-  try {const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data),signal:_ctrl?.signal});return r.json()}
+  try {const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-DC-Token':DC_TOKEN},body:JSON.stringify(data),signal:_ctrl?.signal});return r.json()}
   catch(e){return {error:e.message}}
 }
 function switchTheme(t){
@@ -220,7 +224,7 @@ function toggleAI() {
 function fmtSize(b) {if(b>1e9)return (b/1e9).toFixed(2)+' GB';return (b/1e6).toFixed(1)+' MB'}
 const DECO={'safe_to_delete':'safe','likely_safe':'likely','needs_review':'review','keep':'keep','critical':'keep'}
 const LBL={safe_to_delete:'可删除',likely_safe:'概率可删',needs_review:'需确认',keep:'保留',critical:'禁止删除'}
-const SRC={cache:'缓存',rule:'规则',ai:'AI',local:'本地分析','rule+cache':'规则+缓存','ai+cache':'AI+缓存','local+cache':'本地分析+缓存',dependency:'依赖分析',fingerprint:'指纹库',cancelled:'已取消',error:'异常',ai_cluster:'AI聚类',ai_cross_cluster:'AI交叉聚类'}
+const SRC={cache:'缓存',rule:'规则',ai:'AI',local:'本地分析',degraded:'本地降级','rule+cache':'规则+缓存','ai+cache':'AI+缓存','local+cache':'本地分析+缓存',dependency:'依赖分析',fingerprint:'指纹库',cancelled:'已取消',error:'异常',ai_cluster:'AI聚类',ai_cross_cluster:'AI交叉聚类'}
 
 // 页面持久化
 function saveState() {
@@ -355,7 +359,7 @@ async function handleScan() {
 
     // SSE 流式分析
     const qs = `path=${encodeURIComponent(p)}&top=${t}&recursive=${r}&use_ai=${ai}&provider=${prov}&force=${f}`;
-    _es = new EventSource(`/api/analyze-stream?${qs}`);
+    _es = new EventSource(`/api/analyze-stream?${qs}&token=${encodeURIComponent(DC_TOKEN)}`);
     _ctrl._es = _es;  // 挂到 AbortController 上供取消
 
     _es.onmessage = (e) => {
@@ -564,11 +568,18 @@ async function cleanSelected() {
   if (!files.length) return alert('请先勾选文件');
   if (!confirm('确认清理 ' + files.length + ' 个文件？')) return;
   const r = await api('/api/clean', {files});
-  alert('已清理 ' + r.success + ' 个，释放 ' + fmtSize(r.freed));
+  if (r.error) return alert(r.error);
+  let msg = `已移动 ${r.moved || 0} 个文件到备份区`;
+  if (r.freed) msg += `，实际释放 ${fmtSize(r.freed)}`;
+  if (r.skipped) msg += `，跳过 ${r.skipped} 个`;
+  if (r.batch_id) msg += `\n备份批次：${r.batch_id}`;
+  if (r.warning) msg += `\n\n${r.warning}`;
+  alert(msg);
 }
 
 async function getReport() {
   const r = await api('/api/report', {});
+  if (r.error) return alert(r.error);
   const w = window.open('', '_blank');
   w.document.write(r.html);
   w.document.close();
@@ -602,18 +613,80 @@ class GUIHandler(BaseHTTPRequestHandler):
 
     engine: AnalysisEngine | None = None
     last_results: list[dict] = []
+    token: str = ""
+    port: int = 8765
+    scanned_paths: set[str] = set()
 
+    # ---- 安全校验 -------------------------------------------------
+    def _check_host(self) -> bool:
+        """只接受本机 Host，防止 DNS rebinding。"""
+        host = (self.headers.get("Host") or "").lower()
+        if not host:
+            return True  # 非浏览器客户端（测试/curl）可能不带 Host
+        allowed = {
+            f"127.0.0.1:{GUIHandler.port}",
+            f"localhost:{GUIHandler.port}",
+        }
+        return host in allowed
+
+    def _check_origin(self) -> bool:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        allowed = {
+            f"http://127.0.0.1:{GUIHandler.port}",
+            f"http://localhost:{GUIHandler.port}",
+        }
+        return origin in allowed
+
+    def _token_from_request(self) -> str:
+        token = self.headers.get("X-DC-Token", "")
+        if token:
+            return token
+        qs = parse_qs(urlparse(self.path).query)
+        return (qs.get("token") or [""])[0]
+
+    def _authorized(self) -> bool:
+        if not self._check_host() or not self._check_origin():
+            return False
+        token = self._token_from_request()
+        return bool(GUIHandler.token) and secrets.compare_digest(token, GUIHandler.token)
+
+    def _forbid(self, message: str = "forbidden"):
+        self._respond_json({"error": message}, status=403)
+
+    def _discard_body(self) -> None:
+        """拒绝请求时丢弃已发送的请求体，避免连接被客户端重置。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return
+        if 0 < length <= 1_000_000:
+            try:
+                self.rfile.read(length)
+            except Exception:
+                pass
+
+    # ---- HTTP 入口 -------------------------------------------------
     def do_GET(self):
         if self.path == "/" or self.path == "/index.html":
+            if not self._check_host():
+                self._forbid("仅允许本机访问")
+                return
             self._respond_html(GUI_HTML)
         elif self.path.startswith("/api/analyze-stream"):
+            if not self._authorized():
+                self._forbid("未授权：请刷新页面后重试")
+                return
             # EventSource GET 请求——从 query string 解析参数
-            from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             data = {k: v[0] for k, v in qs.items()}
             # 类型转换
             if "top" in data:
-                data["top"] = int(data["top"])
+                try:
+                    data["top"] = int(data["top"])
+                except ValueError:
+                    data["top"] = 100
             if "recursive" in data:
                 data["recursive"] = data["recursive"].lower() != "false"
             if "use_ai" in data:
@@ -626,19 +699,36 @@ class GUIHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # 不提供 CORS：本工具只允许同源页面访问
+        self.send_response(405)
         self.end_headers()
 
     def do_POST(self):
-        content_len = int(self.headers.get("Content-Length", 0))
+        if not self._authorized():
+            self._discard_body()
+            self._forbid("未授权：请刷新页面后重试")
+            return
+
+        try:
+            content_len = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self._respond_json({"error": "Content-Length 无效"}, status=400)
+            return
+        if content_len > 1_000_000:
+            self._respond_json({"error": "请求体过大"}, status=413)
+            return
+
         body = self.rfile.read(content_len)
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            self._respond_json({"error": "Content-Type 必须是 application/json"}, status=415)
+            return
+
         try:
             data = json.loads(body) if body else {}
         except json.JSONDecodeError:
-            data = {}
+            self._respond_json({"error": "JSON 格式错误"}, status=400)
+            return
 
         if self.path == "/api/check-ai":
             self._handle_check_ai()
@@ -663,9 +753,30 @@ class GUIHandler(BaseHTTPRequestHandler):
     def _handle_check_ai(self):
         from disk_cleaner.db.keystore import KeyStore
         store = KeyStore()
-        providers = store.list_providers()
-        has_env = bool(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY"))
-        self._respond_json({"configured": len(providers) > 0 or has_env, "providers": providers})
+        providers = list(store.list_providers())
+
+        # 环境变量也算已配置
+        env_map = {
+            "deepseek": "DEEPSEEK_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "claude": "ANTHROPIC_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+        }
+        for name, env in env_map.items():
+            if os.environ.get(env) and name not in providers:
+                providers.append(name)
+
+        # Ollama 不需要 Key，探测服务是否在运行
+        if "ollama" not in providers:
+            try:
+                import urllib.request
+                with urllib.request.urlopen("http://127.0.0.1:11434/api/tags", timeout=0.8) as resp:
+                    if resp.status == 200:
+                        providers.append("ollama")
+            except Exception:
+                pass
+
+        self._respond_json({"configured": len(providers) > 0, "providers": providers})
 
     def _handle_scan(self, data: dict):
         path = data.get("path", ".")
@@ -696,6 +807,7 @@ class GUIHandler(BaseHTTPRequestHandler):
             results = eng.analyze_path(path, top_n=top, recursive=recursive, force=force)
             stats = eng.stats
             GUIHandler.last_results = results
+            GUIHandler.scanned_paths = {os.path.abspath(r["path"]) for r in results}
             safe = len([r for r in results if r["decision"] == "safe_to_delete"])
             likely = len([r for r in results if r["decision"] == "likely_safe"])
             review = len([r for r in results if r["decision"] == "needs_review"])
@@ -721,15 +833,17 @@ class GUIHandler(BaseHTTPRequestHandler):
         force = data.get("force", False)
 
         if not os.path.exists(path):
-            self._respond_json({"error": f"路径不存在: {path}"})
+            self._respond_json({"error": f"路径不存在: {path}"}, status=400)
             return
+
+        # 每次新扫描重置本次可清理白名单
+        GUIHandler.scanned_paths = set()
 
         # SSE 响应头
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
         db = _get_db()
@@ -744,9 +858,12 @@ class GUIHandler(BaseHTTPRequestHandler):
                 if evt["type"] == "cancelled":
                     self._sse_send({"type": "cancelled", "current": evt["current"], "total": evt["total"]})
                     break
-                results_buf.append(evt["result"])
-                self._sse_send({"type": "progress", "current": evt["current"], "total": evt["total"], "result": evt["result"]})
+                result = evt["result"]
+                results_buf.append(result)
+                GUIHandler.scanned_paths.add(os.path.abspath(result["path"]))
+                self._sse_send({"type": "progress", "current": evt["current"], "total": evt["total"], "result": result})
 
+            GUIHandler.last_results = results_buf
             stats = eng.stats
             safe = len([r for r in results_buf if r["decision"] == "safe_to_delete"])
             likely = len([r for r in results_buf if r["decision"] == "likely_safe"])
@@ -767,7 +884,10 @@ class GUIHandler(BaseHTTPRequestHandler):
         """在文件资源管理器中打开并选中文件"""
         path = data.get("path", "")
         if not path or not os.path.exists(path):
-            self._respond_json({"error": "文件不存在"})
+            self._respond_json({"error": "文件不存在"}, status=404)
+            return
+        if os.path.abspath(path) not in GUIHandler.scanned_paths:
+            self._respond_json({"error": "只能打开本次扫描结果中的文件"}, status=403)
             return
         try:
             subprocess.run(
@@ -776,7 +896,7 @@ class GUIHandler(BaseHTTPRequestHandler):
             )
             self._respond_json({"status": "ok"})
         except Exception as e:
-            self._respond_json({"error": str(e)})
+            self._respond_json({"error": str(e)}, status=500)
 
     def _handle_cancel(self):
         if GUIHandler.engine:
@@ -785,23 +905,58 @@ class GUIHandler(BaseHTTPRequestHandler):
 
     def _handle_clean(self, data: dict):
         files = data.get("files", [])
+        if not isinstance(files, list) or not files:
+            self._respond_json({"error": "未选择文件"}, status=400)
+            return
+        if len(files) > 1000:
+            self._respond_json({"error": "单次最多清理 1000 个文件"}, status=400)
+            return
+
+        requested = [os.path.abspath(str(f)) for f in files]
+        blocked = [p for p in requested if p not in GUIHandler.scanned_paths]
+        if blocked:
+            self._respond_json({
+                "error": f"拒绝清理：{len(blocked)} 个路径不在本次扫描结果中，请重新分析后再试"
+            }, status=403)
+            return
+
         executor = CleanExecutor()
-        res = executor.clean(files, mode="backup")
+        plan = executor.plan(requested, mode="backup")
+        if not plan.allowed:
+            reasons = "；".join(f"{r['path']}: {r['reason']}" for r in plan.rejected[:5])
+            self._respond_json({"error": f"安全策略拒绝：{reasons}"}, status=403)
+            return
+
+        res = executor.execute(plan)
         summary = executor.get_summary(res)
-        self._respond_json({"success": summary["success_count"], "freed": summary["total_freed"]})
+        self._respond_json({
+            "moved": summary.get("total_moved", 0),
+            "freed": summary.get("total_freed_real", 0),
+            "skipped": summary.get("failed_count", 0),
+            "batch_id": executor.last_batch_id,
+            "warning": "；".join(plan.warnings),
+        })
 
     def _handle_report(self):
         safe = [r for r in GUIHandler.last_results if r["decision"] in ("safe_to_delete", "likely_safe")]
         reclaim = sum(r["size"] for r in safe)
         reclaim_str = f"{reclaim / (1024**3):.2f} GB" if reclaim > 1e9 else f"{reclaim / (1024**2):.1f} MB"
-        rows = "".join(f"<tr><td>{r['name']}</td><td>{r['size_mb']:.1f} MB</td><td>{r['decision']}</td></tr>" for r in safe[:50])
+        rows = "".join(
+            f"<tr><td>{html_module.escape(str(r['name']))}</td>"
+            f"<td>{r['size_mb']:.1f} MB</td>"
+            f"<td>{html_module.escape(str(r['decision']))}</td>"
+            f"<td>{html_module.escape(str(r.get('reason', '')))}</td></tr>"
+            for r in safe[:50]
+        )
         html = f"<html><head><meta charset=utf-8><title>清理报告</title></head><body><h1>清理报告</h1><p>可释放: {reclaim_str}</p><table border=1>{rows}</table></body></html>"
         self._respond_json({"html": html})
 
-    def _respond_json(self, data: dict):
-        self.send_response(200)
+    def _respond_json(self, data: dict, status: int = 200):
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if status >= 400:
+            self.send_header("Connection", "close")
+            self.close_connection = True
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
 
@@ -811,7 +966,8 @@ class GUIHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.end_headers()
-        self.wfile.write(html.encode())
+        # 会话 Token 只注入本机页面，请求 API 时必须回传
+        self.wfile.write(html.replace("__DC_TOKEN__", GUIHandler.token).encode())
 
     def log_message(self, format, *args):
         pass  # 静默日志
@@ -819,15 +975,11 @@ class GUIHandler(BaseHTTPRequestHandler):
 
 def start_gui(port: int = 8765, open_browser: bool = True):
     """启动 Web GUI"""
-    # 清理上次崩溃残留的 WAL 锁文件（不影响历史数据）
-    db_base = os.path.expanduser("~/.disk-cleaner/cache.db")
-    for ext in ("-wal", "-shm"):
-        try:
-            os.remove(db_base + ext)
-        except OSError:
-            pass
+    GUIHandler.token = secrets.token_urlsafe(32)
+    GUIHandler.port = port
+    GUIHandler.scanned_paths = set()
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), GUIHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), GUIHandler)
     server.daemon_threads = True
     url = f"http://127.0.0.1:{port}"
     print(f"GUI 已启动: {url}")
