@@ -6,6 +6,8 @@ import pytest
 from disk_cleaner.analyzer.ai_client import (
     AIProvider,
     AIUnavailableError,
+    OpenAIProvider,
+    OllamaProvider,
     FileAnalysisInput,
     FileAnalysisOutput,
     parse_ai_response,
@@ -167,6 +169,7 @@ class TestAIProvider:
 
     def test_从配置构建OpenAI(self):
         provider = AIProvider.create("openai", api_key="sk-test", model="gpt-4o-mini")
+        assert isinstance(provider, OpenAIProvider)
         assert provider.provider_name == "openai"
         assert provider.model == "gpt-4o-mini"
 
@@ -180,6 +183,7 @@ class TestAIProvider:
 
     def test_ollama不需要api_key(self):
         provider = AIProvider.create("ollama", model="qwen2.5:1.5b")
+        assert isinstance(provider, OllamaProvider)
         assert provider.provider_name == "ollama"
 
     def test_预算用尽时快速失败(self):

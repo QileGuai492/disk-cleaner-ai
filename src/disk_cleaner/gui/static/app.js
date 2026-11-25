@@ -519,6 +519,20 @@ function renderChatAnswer(data){
     actions.appendChild(btn);
   });
   if(actions.children.length) box.appendChild(actions);
+  const feedback = document.createElement('div');
+  feedback.className = 'chat-feedback';
+  const help = document.createElement('button');
+  help.textContent = '有帮助';
+  help.onclick = ()=>{
+    try {
+      localStorage.setItem('dc_chat_helpful', String(Number(localStorage.getItem('dc_chat_helpful')||0)+1));
+    } catch(e) {}
+    help.textContent = '已记录';
+    help.disabled = true;
+  };
+  feedback.appendChild(help);
+  feedback.appendChild(document.createTextNode('本地反馈，不上传内容'));
+  box.appendChild(feedback);
   $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
 }
 function sendChat(){

@@ -269,7 +269,15 @@ class AIProvider:
         supported = ("openai", "claude", "ollama", "gemini", "deepseek", "local")
         if provider not in supported:
             raise ValueError(f"不支持的 AI 后端: {provider}，支持: {', '.join(supported)}")
-        return cls(provider_name=provider, api_key=api_key, model=model, **kwargs)
+        provider_class = {
+            "openai": OpenAIProvider,
+            "claude": ClaudeProvider,
+            "ollama": OllamaProvider,
+            "gemini": GeminiProvider,
+            "deepseek": DeepSeekProvider,
+            "local": LocalProvider,
+        }[provider]
+        return provider_class(api_key=api_key, model=model, **kwargs)
 
     @property
     def stats(self) -> dict:
@@ -324,18 +332,7 @@ class AIProvider:
 
         for attempt in range(self.max_retries):
             try:
-                if self.provider_name == "openai":
-                    result = self._call_openai(prompt)
-                elif self.provider_name == "ollama":
-                    result = self._call_ollama(prompt)
-                elif self.provider_name == "claude":
-                    result = self._call_claude(prompt)
-                elif self.provider_name == "gemini":
-                    result = self._call_gemini(prompt)
-                elif self.provider_name == "deepseek":
-                    result = self._call_deepseek(prompt)
-                else:
-                    raise AIUnavailableError(f"未知的 AI 后端: {self.provider_name}")
+                result = self._call(prompt)
 
                 if result and result.strip():
                     self._total_calls += 1
@@ -401,6 +398,20 @@ class AIProvider:
                 time.sleep(wait)
 
         self._call_times.append(now)
+
+    def _call(self, prompt: str) -> str:
+        """默认实现；具体 provider 子类会覆盖。"""
+        dispatch = {
+            "openai": self._call_openai,
+            "ollama": self._call_ollama,
+            "claude": self._call_claude,
+            "gemini": self._call_gemini,
+            "deepseek": self._call_deepseek,
+        }
+        handler = dispatch.get(self.provider_name)
+        if handler is None:
+            raise AIUnavailableError(f"未知的 AI 后端: {self.provider_name}")
+        return handler(prompt)
 
     def _call_openai(self, prompt: str) -> str:
         """调用 OpenAI API"""
@@ -642,3 +653,51 @@ class AIProvider:
 
         # === 兜底 ===
         return json.dumps({"decision": "needs_review", "confidence": 0.40, "reason": "无法根据文件名和路径自动判断", "risk": "unknown"})
+
+
+class LocalProvider(AIProvider):
+    def __init__(self, api_key: str = "", model: str = "", **kwargs):
+        super().__init__("local", api_key=api_key, model=model, **kwargs)
+
+    def _call(self, prompt: str) -> str:
+        return self._mock_analyze(prompt)
+
+
+class OpenAIProvider(AIProvider):
+    def __init__(self, api_key: str = "", model: str = "", **kwargs):
+        super().__init__("openai", api_key=api_key, model=model, **kwargs)
+
+    def _call(self, prompt: str) -> str:
+        return self._call_openai(prompt)
+
+
+class DeepSeekProvider(AIProvider):
+    def __init__(self, api_key: str = "", model: str = "", **kwargs):
+        super().__init__("deepseek", api_key=api_key, model=model, **kwargs)
+
+    def _call(self, prompt: str) -> str:
+        return self._call_deepseek(prompt)
+
+
+class ClaudeProvider(AIProvider):
+    def __init__(self, api_key: str = "", model: str = "", **kwargs):
+        super().__init__("claude", api_key=api_key, model=model, **kwargs)
+
+    def _call(self, prompt: str) -> str:
+        return self._call_claude(prompt)
+
+
+class GeminiProvider(AIProvider):
+    def __init__(self, api_key: str = "", model: str = "", **kwargs):
+        super().__init__("gemini", api_key=api_key, model=model, **kwargs)
+
+    def _call(self, prompt: str) -> str:
+        return self._call_gemini(prompt)
+
+
+class OllamaProvider(AIProvider):
+    def __init__(self, api_key: str = "", model: str = "", **kwargs):
+        super().__init__("ollama", api_key=api_key, model=model, **kwargs)
+
+    def _call(self, prompt: str) -> str:
+        return self._call_ollama(prompt)

@@ -130,6 +130,8 @@ td a:hover{text-decoration:underline}
 .chat-evidence{margin-top:8px;font-size:11px;color:var(--text-secondary);white-space:normal}
 .chat-evidence details{margin-top:4px}
 .chat-evidence li{margin:3px 0}
+.chat-feedback{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:11px;color:var(--text-secondary)}
+.chat-feedback button{font-size:11px;padding:2px 6px;background:var(--bg-card);color:var(--text-secondary);border:1px solid var(--border)}
 .chat-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .chat-actions button{font-size:11px;padding:4px 8px}
 .chat-input{border-top:1px solid var(--border);padding:10px 16px;display:flex;flex-direction:column;gap:6px}
