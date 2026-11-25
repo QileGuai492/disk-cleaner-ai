@@ -158,3 +158,14 @@ class TestScanRecords:
         assert stats["total_scans"] == 2
         assert stats["total_files_cleaned"] == 300
         assert stats["total_bytes_freed"] == 1_500_000_000
+
+    def test_清理记录与扫描记录分开统计(self, db):
+        records = ScanRecord(db)
+        sid = records.start_scan(path="C:\\", file_count=1000)
+        records.finish_scan(sid, analyzed_count=800, cleaned_count=0, bytes_freed=0)
+        records.record_cleanup(cleaned_count=5, bytes_moved=1000, bytes_freed=500)
+
+        stats = records.get_total_stats()
+        assert stats["total_scans"] == 1
+        assert stats["total_files_cleaned"] == 5
+        assert stats["total_bytes_freed"] == 500

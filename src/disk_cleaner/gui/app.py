@@ -808,6 +808,13 @@ class GUIHandler(BaseHTTPRequestHandler):
             stats = eng.stats
             GUIHandler.last_results = results
             GUIHandler.scanned_paths = {os.path.abspath(r["path"]) for r in results}
+            try:
+                from disk_cleaner.db.models import ScanRecord
+                records = ScanRecord(db)
+                scan_id = records.start_scan(os.path.abspath(path), len(results))
+                records.finish_scan(scan_id, len(results), 0, 0)
+            except Exception:
+                pass
             safe = len([r for r in results if r["decision"] == "safe_to_delete"])
             likely = len([r for r in results if r["decision"] == "likely_safe"])
             review = len([r for r in results if r["decision"] == "needs_review"])
@@ -864,6 +871,13 @@ class GUIHandler(BaseHTTPRequestHandler):
                 self._sse_send({"type": "progress", "current": evt["current"], "total": evt["total"], "result": result})
 
             GUIHandler.last_results = results_buf
+            try:
+                from disk_cleaner.db.models import ScanRecord
+                records = ScanRecord(db)
+                scan_id = records.start_scan(os.path.abspath(path), eng.stats.get("total", len(results_buf)))
+                records.finish_scan(scan_id, len(results_buf), 0, 0)
+            except Exception:
+                pass
             stats = eng.stats
             safe = len([r for r in results_buf if r["decision"] == "safe_to_delete"])
             likely = len([r for r in results_buf if r["decision"] == "likely_safe"])
@@ -929,6 +943,19 @@ class GUIHandler(BaseHTTPRequestHandler):
 
         res = executor.execute(plan)
         summary = executor.get_summary(res)
+        try:
+            from disk_cleaner.db.models import ScanRecord
+            stat_db = _get_db()
+            try:
+                ScanRecord(stat_db).record_cleanup(
+                    summary["success_count"],
+                    summary.get("total_moved", 0),
+                    summary.get("total_freed_real", 0),
+                )
+            finally:
+                stat_db.close()
+        except Exception:
+            pass
         self._respond_json({
             "moved": summary.get("total_moved", 0),
             "freed": summary.get("total_freed_real", 0),

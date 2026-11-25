@@ -87,14 +87,22 @@ class SystemTray:
         self._scan_callback = scan_callback
         self._on_quit = on_quit
 
-        def do_scan():
-            if scan_callback:
-                for p in self._scan_paths:
+        def _run_scan():
+            if not scan_callback:
+                show_toast("磁盘清理", "未配置扫描回调")
+                return
+            for p in self._scan_paths:
+                try:
                     scan_callback(p)
-            show_toast("磁盘清理", f"已完成 {len(self._scan_paths)} 个目录的扫描")
+                except Exception:
+                    pass
+
+        def do_scan():
+            # 菜单回调不能阻塞托盘线程
+            threading.Thread(target=_run_scan, daemon=True).start()
 
         def do_analyze():
-            show_toast("磁盘清理", "AI 分析完成，发现可清理文件")
+            threading.Thread(target=_run_scan, daemon=True).start()
 
         def do_exit(icon, item):
             self.stop()
@@ -104,7 +112,7 @@ class SystemTray:
 
         menu = pystray.Menu(
             pystray.MenuItem("立即扫描", do_scan, default=True),
-            pystray.MenuItem("分析 C 盘", do_analyze),
+            pystray.MenuItem("扫描 C 盘", do_analyze),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", do_exit),
         )

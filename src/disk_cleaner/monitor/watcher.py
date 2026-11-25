@@ -34,10 +34,18 @@ class MonitorConfig:
         "C:\\Windows\\Temp",
     ])
     ignore_paths: list[str] = field(default_factory=lambda: [
-        "C:\\Windows\\System32\\*",
-        "C:\\Windows\\WinSxS\\*",
+        "C:\\Windows\\*",
+        "C:\\Program Files\\*",
+        "C:\\Program Files (x86)\\*",
+        "C:\\ProgramData\\*",
+        "C:\\$Recycle.Bin\\*",
+        "C:\\System Volume Information\\*",
+        "*\\$Recycle.Bin\\*",
+        "*\\System Volume Information\\*",
         "*\\Microsoft\\Edge\\*",
         "*\\Google\\Chrome\\*",
+        "*\\node_modules\\*",
+        "*\\.git\\*",
     ])
     trusted_processes: set[str] = field(default_factory=lambda: {
         "svchost.exe", "TrustedInstaller.exe", "MsMpEng.exe",
@@ -47,6 +55,7 @@ class MonitorConfig:
     cooldown_seconds: float = 3.0
     max_alerts_per_hour: int = 10
     detect_process: bool = True  # 是否检测关联进程（慢操作）
+    max_files_per_scan: int = 10000  # 递归扫描上限，避免监控自身拖慢系统
 
     def should_ignore(self, path: str) -> bool:
         """检查路径是否应被忽略"""
@@ -70,10 +79,12 @@ class FileMonitor:
         self._events: list[FileEvent] = []
         self._lock = threading.Lock()
         self._known_files: dict[str, tuple[int, float]] = {}  # path → (size, mtime)
-        self._cooldowns: dict[str, float] = {}  # path → last event time
+        self._pending: dict[str, tuple[int, float, float, str]] = {}  # path → (size, mtime, first_seen, type)
         self._alert_count = 0
         self._alert_window_start = time.time()
         self._on_event_callback: Optional[Callable] = None
+        # 冷却期很短时加快轮询，保证测试/即时监控仍能及时触发
+        self._poll_interval = max(0.2, min(1.0, self.config.cooldown_seconds or 1.0))
 
     @property
     def is_running(self) -> bool:
@@ -106,109 +117,152 @@ class FileMonitor:
             self._events.clear()
             return events
 
+    def _iter_files(self, watch_path: str):
+        """递归遍历监控目录，跳过忽略目录，并限制单次扫描文件数。"""
+        count = 0
+        for root, dirs, files in os.walk(watch_path, followlinks=False):
+            dirs[:] = [
+                d for d in dirs
+                if not self.config.should_ignore(os.path.join(root, d))
+            ]
+            for fname in files:
+                path = os.path.join(root, fname)
+                if self.config.should_ignore(path):
+                    continue
+                count += 1
+                if count > self.config.max_files_per_scan:
+                    return
+                yield path
+
     def _scan_initial_state(self) -> None:
-        """扫描监控目录的初始状态"""
+        """递归扫描监控目录的初始状态。"""
         for watch_path in self.config.watch_paths:
             if not os.path.exists(watch_path):
                 continue
             try:
-                for entry in os.scandir(watch_path):
-                    if entry.is_file():
-                        try:
-                            stat = entry.stat()
-                            self._known_files[entry.path] = (stat.st_size, stat.st_mtime)
-                        except OSError:
-                            pass
-            except PermissionError:
+                for path in self._iter_files(watch_path):
+                    if os.path.islink(path):
+                        continue
+                    try:
+                        st = os.stat(path)
+                        if not os.path.isfile(path):
+                            continue
+                        self._known_files[path] = (st.st_size, st.st_mtime)
+                    except OSError:
+                        pass
+            except (PermissionError, OSError):
                 pass
 
     def _monitor_loop(self) -> None:
-        """监控主循环"""
+        """监控主循环。"""
         while self._running:
             try:
                 self._check_for_changes()
             except Exception:
                 pass
-            time.sleep(1.0)  # 每秒检查一次
+            time.sleep(self._poll_interval)
 
     def _check_for_changes(self) -> None:
-        """检查文件变更"""
+        """递归检查文件变更，文件写入稳定后才触发事件。"""
         min_size = int(self.config.min_file_size_mb * 1024 * 1024)
+        cooldown = max(0.0, self.config.cooldown_seconds)
         now = time.time()
+        seen: set[str] = set()
+        complete = True
 
         for watch_path in self.config.watch_paths:
             if not os.path.exists(watch_path):
                 continue
+            count = 0
             try:
-                for entry in os.scandir(watch_path):
-                    if not entry.is_file():
+                for path in self._iter_files(watch_path):
+                    count += 1
+                    if count > self.config.max_files_per_scan:
+                        complete = False
+                        break
+                    if os.path.islink(path):
                         continue
-
-                    path = entry.path
-
-                    # 忽略系统路径
-                    if self.config.should_ignore(path):
-                        continue
-
                     try:
-                        stat = entry.stat()
+                        st = os.stat(path)
                     except OSError:
                         continue
-
-                    # 大小过滤
-                    if stat.st_size < min_size:
+                    if not os.path.isfile(path):
                         continue
 
-                    # 检查是否是已知文件
-                    if path in self._known_files:
-                        old_size, old_mtime = self._known_files[path]
-                        if stat.st_size == old_size and stat.st_mtime == old_mtime:
-                            continue  # 未变化
+                    seen.add(path)
+                    current = (st.st_size, st.st_mtime)
+                    previous = self._known_files.get(path)
 
-                        # 冷却期检查
-                        if path in self._cooldowns:
-                            if now - self._cooldowns[path] < self.config.cooldown_seconds:
-                                continue
+                    if previous is None:
+                        # 新文件：先记录，等待写入稳定
+                        self._known_files[path] = current
+                        if st.st_size >= min_size:
+                            self._pending[path] = (st.st_size, st.st_mtime, now, "created")
+                        else:
+                            self._pending.pop(path, None)
+                        continue
 
-                        event_type = "modified"
+                    if previous == current:
+                        # 大小与 mtime 稳定，检查冷却时间
+                        pending = self._pending.get(path)
+                        if (
+                            pending
+                            and pending[0] == current[0]
+                            and pending[1] == current[1]
+                            and now - pending[2] >= cooldown
+                        ):
+                            self._maybe_emit(path, current, pending[3], now)
+                        continue
+
+                    # 文件仍在变化：保留“新文件”语义，并重置等待计时
+                    self._known_files[path] = current
+                    if st.st_size >= min_size:
+                        pending = self._pending.get(path)
+                        event_type = pending[3] if pending else "modified"
+                        self._pending[path] = (st.st_size, st.st_mtime, now, event_type)
                     else:
-                        event_type = "created"
+                        self._pending.pop(path, None)
+            except (PermissionError, OSError):
+                continue
+            if count >= self.config.max_files_per_scan:
+                complete = False
 
-                    # 速率限制
-                    if now - self._alert_window_start > 3600:
-                        self._alert_count = 0
-                        self._alert_window_start = now
+        # 全量扫描完成时清理已删除文件的状态；被上限截断时不做清理
+        if complete:
+            for path in list(self._known_files):
+                if path not in seen:
+                    self._known_files.pop(path, None)
+                    self._pending.pop(path, None)
 
-                    if self._alert_count >= self.config.max_alerts_per_hour:
-                        continue
+    def _maybe_emit(self, path: str, current: tuple[int, float], event_type: str, now: float) -> None:
+        """满足告警限制与进程过滤后发出事件。"""
+        if now - self._alert_window_start > 3600:
+            self._alert_count = 0
+            self._alert_window_start = now
 
-                    # 检测关联进程（可开关）
-                    related_process = None
-                    if self.config.detect_process:
-                        proc_info = ProcessDetector.find_file_owner(path)
-                        related_process = proc_info["name"] if proc_info else None
+        if self._alert_count >= self.config.max_alerts_per_hour:
+            return
 
-                    # 跳过受信任进程
-                    if related_process and self.config.is_trusted_process(related_process):
-                        continue
+        related_process = None
+        if self.config.detect_process:
+            proc_info = ProcessDetector.find_file_owner(path)
+            related_process = proc_info["name"] if proc_info else None
 
-                    # 创建事件
-                    event = FileEvent(
-                        path=path,
-                        size=stat.st_size,
-                        event_type=event_type,
-                        detected_at=now,
-                        related_process=related_process,
-                    )
-                    self._add_event(event)
-                    self._known_files[path] = (stat.st_size, stat.st_mtime)
-                    self._cooldowns[path] = now
-                    self._alert_count += 1
+        if related_process and self.config.is_trusted_process(related_process):
+            self._pending.pop(path, None)
+            return
 
-            except PermissionError:
-                pass
-            except OSError:
-                pass
+        event = FileEvent(
+            path=path,
+            size=current[0],
+            event_type=event_type,
+            detected_at=now,
+            related_process=related_process,
+        )
+        self._add_event(event)
+        self._known_files[path] = current
+        self._pending.pop(path, None)
+        self._alert_count += 1
 
     def _add_event(self, event: FileEvent) -> None:
         """添加事件到队列"""

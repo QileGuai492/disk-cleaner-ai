@@ -80,6 +80,19 @@ class TestFileMonitor:
         assert len(events) >= 1, f"期望至少 1 个事件，实际 {len(events)} 个"
         assert any("new_file.tmp" in e.path for e in events)
 
+    def test_检测嵌套目录新文件(self, monitor, temp_dir):
+        nested = temp_dir / "a" / "b"
+        nested.mkdir(parents=True)
+        monitor.start()
+        time.sleep(0.5)
+
+        (nested / "nested_new.bin").write_bytes(b"\x00" * 2000)
+        time.sleep(1.5)
+        events = monitor.get_events()
+        monitor.stop()
+
+        assert any("nested_new.bin" in e.path for e in events)
+
     def test_检测大文件创建(self, monitor, temp_dir):
         monitor.start()
         time.sleep(0.5)

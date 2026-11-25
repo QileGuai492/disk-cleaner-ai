@@ -2,8 +2,10 @@
 
 import json
 import os
+import subprocess
 import sys
 import time
+from datetime import datetime
 
 import click
 
@@ -20,6 +22,7 @@ class StrippedPath(click.Path):
             value = value.strip()
             for q in ('"', '“', '”', '‘', '’', "'"):
                 value = value.strip(q)
+            value = os.path.expanduser(value)
         return super().convert(value, param, ctx)
 
 
@@ -135,6 +138,13 @@ def analyze(path: str, provider: str, model: str, api_key: str, preview: bool, f
 
         results = engine.analyze_path(path, top_n=top, force=force, recursive=recursive)
         stats = engine.stats
+        try:
+            from disk_cleaner.db.models import ScanRecord
+            records = ScanRecord(db)
+            scan_id = records.start_scan(os.path.abspath(path), len(results))
+            records.finish_scan(scan_id, len(results), 0, 0)
+        except Exception:
+            pass
 
         if not results:
             click.echo("没有找到需要分析的文件。")
@@ -263,7 +273,16 @@ def clean(files: tuple, mode: str, yes: bool):
         return
 
     executor = CleanExecutor()
-    file_list = list(files)
+    import glob
+
+    file_list: list[str] = []
+    for raw in files:
+        cleaned = raw.strip()
+        for q in ('"', '“', '”', '‘', '’', "'"):
+            cleaned = cleaned.strip(q)
+        cleaned = os.path.expanduser(cleaned)
+        matches = glob.glob(cleaned)
+        file_list.extend(matches if matches else [cleaned])
 
     # 预估释放空间
     total = executor.estimate_freed_space(file_list)
@@ -282,6 +301,20 @@ def clean(files: tuple, mode: str, yes: bool):
 
     results = executor.clean(file_list, mode=mode)
     summary = executor.get_summary(results)
+    try:
+        from disk_cleaner.db.models import Database, ScanRecord
+        stat_db = Database(_get_db_path())
+        stat_db.initialize()
+        try:
+            ScanRecord(stat_db).record_cleanup(
+                summary["success_count"],
+                summary.get("total_moved", 0),
+                summary.get("total_freed_real", 0),
+            )
+        finally:
+            stat_db.close()
+    except Exception:
+        pass
 
     click.echo(f"\n清理完成:")
     click.echo(f"  成功: {summary['success_count']} 个")
@@ -358,7 +391,7 @@ def backup(action: str, batch_id: str | None):
 
 @cli.command()
 @click.option("--min-size", "-s", type=int, default=10, help="最小文件大小（MB）")
-@click.option("--duration", "-d", type=int, default=60, help="监控持续时间（秒），0 表示无限")
+@click.option("--duration", "-d", type=int, default=0, help="监控持续时间（秒），0 表示无限")
 def monitor(min_size: int, duration: int):
     """启动实时文件监控"""
     from disk_cleaner.monitor.watcher import FileMonitor, MonitorConfig
@@ -520,8 +553,63 @@ th,td{{border:1px solid #ddd;padding:8px;text-align:left}} th{{background:#f0f0f
         db.close()
 
 
+def _run_scheduled_scan(path: str, notify: bool = True) -> dict:
+    """执行一次定时扫描，写入统计与最近结果。"""
+    from disk_cleaner.db.models import ScanRecord
+    from disk_cleaner.cli.scheduler import ScanScheduler
+
+    db = Database(_get_db_path())
+    db.initialize()
+    try:
+        engine = AnalysisEngine(db, ai_provider="local", ai_model="heuristic")
+        results = engine.analyze_path(path, top_n=200, recursive=True)
+        safe = [r for r in results if r["decision"] == "safe_to_delete"]
+        likely = [r for r in results if r["decision"] == "likely_safe"]
+        reclaim = sum(r["size"] for r in safe + likely)
+        try:
+            records = ScanRecord(db)
+            scan_id = records.start_scan(os.path.abspath(path), len(results))
+            records.finish_scan(scan_id, len(results), 0, 0)
+        except Exception:
+            pass
+
+        summary = {
+            "path": os.path.abspath(path),
+            "scanned_at": datetime.now().isoformat(timespec="seconds"),
+            "total": len(results),
+            "safe": len(safe),
+            "likely": len(likely),
+            "reclaimable_bytes": reclaim,
+        }
+        state_path = os.path.expanduser("~/.disk-cleaner/last_scan.json")
+        try:
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+        if notify and (safe or likely):
+            try:
+                from disk_cleaner.gui.tray import show_toast
+                show_toast(
+                    "磁盘清理",
+                    f"{path} 发现 {len(safe) + len(likely)} 个可清理文件，"
+                    f"约 {reclaim / (1024**2):.0f} MB",
+                )
+            except Exception:
+                pass
+        return summary
+    finally:
+        db.close()
+
+
 @cli.command()
-@click.argument("action", type=click.Choice(["start", "stop", "status", "run"]), default="status")
+@click.argument(
+    "action",
+    type=click.Choice(["start", "stop", "status", "run", "daemon"]),
+    default="status",
+)
 def schedule(action: str):
     """管理定时扫描"""
     from disk_cleaner.cli.scheduler import ScanScheduler
@@ -529,29 +617,94 @@ def schedule(action: str):
     sched = ScanScheduler()
 
     if action == "start":
+        if sched.is_daemon_running():
+            click.echo("定时扫描已在运行。")
+            return
         sched.config.enabled = True
         sched._save_config()
-        sched.start()
-        click.echo(f"定时扫描已启动（间隔 {sched.config.interval_hours} 小时）")
+
+        cmd = [sys.executable, "-m", "disk_cleaner.cli.main", "schedule", "daemon"]
+        popen_kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = (
+                subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+                | subprocess.CREATE_NO_WINDOW
+            )
+        else:
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(cmd, **popen_kwargs)
+        sched.write_pid(proc.pid)
+        time.sleep(0.8)
+        if proc.poll() is not None:
+            sched.remove_pid()
+            click.echo("定时扫描启动失败，请检查日志或直接运行 schedule daemon。", err=True)
+            return
+        click.echo(f"定时扫描已启动（间隔 {sched.config.interval_hours} 小时，PID {proc.pid}）")
         click.echo(f"扫描路径: {', '.join(sched.config.scan_paths)}")
 
+    elif action == "daemon":
+        if sched.is_daemon_running() and sched.read_pid() != os.getpid():
+            click.echo("已有定时扫描进程在运行。")
+            return
+        sched.write_pid()
+        sched.config.enabled = True
+        sched.set_scan_function(
+            lambda p: _run_scheduled_scan(p, notify=sched.config.notify_on_findings)
+        )
+        sched.start()
+        try:
+            while sched.is_running:
+                time.sleep(2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            sched.stop()
+            sched.remove_pid()
+
     elif action == "stop":
-        sched.stop()
+        pid = sched.read_pid()
+        stopped = False
+        if pid:
+            try:
+                import psutil
+                proc = psutil.Process(pid)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                stopped = True
+            except Exception:
+                pass
+        sched.remove_pid()
         sched.config.enabled = False
         sched._save_config()
-        click.echo("定时扫描已停止")
+        click.echo("定时扫描已停止" if stopped else "没有正在运行的定时扫描进程。")
 
     elif action == "status":
         st = sched.status
-        click.echo(f"定时扫描: {'运行中' if st['running'] else '已停止'}")
+        running = sched.is_daemon_running()
+        click.echo(f"定时扫描: {'运行中' if running else '已停止'}")
         click.echo(f"上次扫描: {st['last_scan'] or '无'}")
         click.echo(f"下次扫描: {st['next_scan'] or '无'}")
         click.echo(f"扫描间隔: {st['config']['interval_hours']} 小时")
         click.echo(f"自动清理: {'是' if st['config']['auto_clean'] else '否'}")
+        if st["config"]["auto_clean"]:
+            click.echo("注意：自动清理当前不会直接删除文件，只生成扫描结果。")
 
     elif action == "run":
         click.echo("正在执行立即扫描...")
-        sched.run_now()
+        sched.set_scan_function(
+            lambda p: _run_scheduled_scan(p, notify=sched.config.notify_on_findings)
+        )
+        sched.run_once()
+        click.echo("扫描完成。")
 
 
 @cli.command()

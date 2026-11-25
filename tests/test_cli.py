@@ -107,6 +107,29 @@ class TestCheckDeps:
         assert "不给出逐个文件的安全结论" in result.output
 
 
+class TestStatsRecording:
+    """扫描后 stats 应该有真实数字。"""
+
+    def test_分析后统计有扫描记录(self, runner, tmp_path, monkeypatch):
+        import disk_cleaner.cli.main as cli_module
+
+        db_path = tmp_path / "cache.db"
+        monkeypatch.setattr(cli_module, "_get_db_path", lambda: str(db_path))
+
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "debug.tmp").write_bytes(b"\x00" * 1000)
+
+        analyze_result = runner.invoke(
+            cli, ["analyze", str(work), "--provider", "ollama", "--top", "5"]
+        )
+        assert analyze_result.exit_code == 0
+
+        stats_result = runner.invoke(cli, ["stats"])
+        assert stats_result.exit_code == 0
+        assert "总扫描次数: 1" in stats_result.output
+
+
 class TestCLIGeneral:
     """通用 CLI 测试"""
 

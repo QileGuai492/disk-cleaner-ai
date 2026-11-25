@@ -62,6 +62,14 @@ class Database:
             imported_dll    TEXT NOT NULL,
             PRIMARY KEY (importer_path, imported_dll)
         );
+
+        CREATE TABLE IF NOT EXISTS clean_records (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            cleaned_count   INTEGER DEFAULT 0,
+            bytes_moved     INTEGER DEFAULT 0,
+            bytes_freed     INTEGER DEFAULT 0,
+            created_at      INTEGER NOT NULL
+        );
         """)
         self._conn.commit()
 
@@ -202,16 +210,27 @@ class ScanRecord:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def record_cleanup(self, cleaned_count: int, bytes_moved: int = 0, bytes_freed: int = 0) -> int:
+        """记录一次清理操作（与扫描记录分开，避免污染扫描次数）。"""
+        now = int(time.time())
+        cursor = self._db._conn.execute(
+            """INSERT INTO clean_records (cleaned_count, bytes_moved, bytes_freed, created_at)
+               VALUES (?, ?, ?, ?)""",
+            (cleaned_count, bytes_moved, bytes_freed, now),
+        )
+        self._db._conn.commit()
+        return cursor.lastrowid
+
     def get_total_stats(self) -> dict:
-        """获取累计统计"""
+        """获取累计统计（扫描记录 + 清理记录）"""
         row = self._db._conn.execute(
             """SELECT
-                 COUNT(*) as total_scans,
-                 COALESCE(SUM(file_count), 0) as total_files_scanned,
-                 COALESCE(SUM(analyzed_count), 0) as total_files_analyzed,
-                 COALESCE(SUM(cleaned_count), 0) as total_files_cleaned,
-                 COALESCE(SUM(bytes_freed), 0) as total_bytes_freed
-               FROM scan_records
-               WHERE status='completed'"""
+                 (SELECT COUNT(*) FROM scan_records WHERE status='completed') as total_scans,
+                 (SELECT COALESCE(SUM(file_count), 0) FROM scan_records WHERE status='completed') as total_files_scanned,
+                 (SELECT COALESCE(SUM(analyzed_count), 0) FROM scan_records WHERE status='completed') as total_files_analyzed,
+                 (SELECT COALESCE(SUM(cleaned_count), 0) FROM scan_records)
+                   + (SELECT COALESCE(SUM(cleaned_count), 0) FROM clean_records) as total_files_cleaned,
+                 (SELECT COALESCE(SUM(bytes_freed), 0) FROM scan_records)
+                   + (SELECT COALESCE(SUM(bytes_freed), 0) FROM clean_records) as total_bytes_freed"""
         ).fetchone()
         return dict(row) if row else {}

@@ -163,6 +163,9 @@ disk-cleaner schedule run       # 立即执行一次
 disk-cleaner schedule stop      # 停止
 ```
 
+> `start` 会启动独立后台进程，PID 写入 `~/.disk-cleaner/scheduler.pid`；`stop` 终止该进程。
+> `auto_clean` 当前不会直接删除文件，只生成扫描结果；自动删除仍需人工确认。
+
 配置文件 `~/.disk-cleaner/schedule.json` 可自定义：
 ```json
 {
@@ -214,7 +217,7 @@ disk-cleaner tray
 
 托盘图标右键菜单：
 - **立即扫描** — 触发扫描
-- **分析 C 盘** — AI 分析
+- **扫描 C 盘** — 用本地规则快速扫描
 - **退出** — 停止托盘
 
 后台每小时自动扫描一次，发现可清理文件时弹 Windows 通知。
@@ -294,7 +297,7 @@ disk-cleaner check-deps <要搬迁的目录>
     └── keys.enc      # API Key（Windows DPAPI 加密）
 ```
 
-备份区默认在 `~/disk-cleaner-backup/`，30 天自动清理。
+备份区默认在 `~/disk-cleaner-backup/`；每次执行清理前会自动清理过期批次（默认 30 天）。
 
 ## 卸载
 
