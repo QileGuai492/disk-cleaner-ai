@@ -19,6 +19,7 @@ from disk_cleaner.analyzer.ai_client import (
     parse_ai_response,
 )
 from disk_cleaner.analyzer.anonymizer import PathAnonymizer
+from disk_cleaner.analyzer.result import AnalysisResult
 from disk_cleaner.analyzer.fingerprints import FingerprintDB
 from disk_cleaner.analyzer.deps import DependencyAnalyzer
 from disk_cleaner.db.models import Database, AnalysisCache
@@ -151,12 +152,29 @@ class AnalysisEngine:
     @property
     def ai(self) -> AIProvider:
         if self._ai is None:
+            timeout_seconds = 30.0
+            budget_usd = 0.0
+            input_cost = 0.0
+            output_cost = 0.0
+            try:
+                from disk_cleaner.config import load_config
+                ai_config = load_config().ai
+                timeout_seconds = ai_config.timeout_seconds
+                budget_usd = ai_config.budget_usd
+                input_cost = ai_config.input_cost_per_million
+                output_cost = ai_config.output_cost_per_million
+            except Exception:
+                pass
             self._ai = AIProvider.create(
                 self.ai_provider,
                 api_key=self.api_key,
                 model=self.ai_model,
                 max_retries=self.ai_max_retries,
                 rate_limit_rpm=self.ai_rate_limit_rpm,
+                timeout_seconds=timeout_seconds,
+                budget_usd=budget_usd,
+                input_cost_per_million=input_cost,
+                output_cost_per_million=output_cost,
             )
         return self._ai
 
@@ -240,12 +258,12 @@ class AnalysisEngine:
 
         for fi in needs_ai:
             if self._cancelled:
-                results.append({
-                    "path": fi.path, "name": fi.name, "size": fi.size,
-                    "size_mb": fi.size_mb, "extension": fi.extension,
-                    "mtime": fi.mtime, "decision": "needs_review",
-                    "confidence": 0.0, "reason": "分析已取消", "risk": "none", "source": "cancelled",
-                })
+                results.append(AnalysisResult(
+                    path=fi.path, name=fi.name, size=fi.size,
+                    size_mb=fi.size_mb, extension=fi.extension,
+                    mtime=fi.mtime, decision="needs_review",
+                    confidence=0.0, reason="分析已取消", risk="none", source="cancelled",
+                ))
                 continue
             ai_result = self._analyze_single(fi)
             results.append(ai_result)
@@ -484,14 +502,14 @@ class AnalysisEngine:
             )
         return self._result_from_output(fi, output, source, reason=reason)
 
-    def _result_from_output(self, fi: FileInfo, output, source: str, reason: str | None = None) -> dict:
-        return {
-            "path": fi.path, "name": fi.name, "size": fi.size, "size_mb": fi.size_mb,
-            "extension": fi.extension, "mtime": fi.mtime,
-            "decision": output.decision, "confidence": output.confidence,
-            "reason": output.reason if reason is None else reason,
-            "risk": output.risk, "source": source,
-        }
+    def _result_from_output(self, fi: FileInfo, output, source: str, reason: str | None = None) -> AnalysisResult:
+        return AnalysisResult(
+            path=fi.path, name=fi.name, size=fi.size, size_mb=fi.size_mb,
+            extension=fi.extension, mtime=fi.mtime,
+            decision=output.decision, confidence=output.confidence,
+            reason=output.reason if reason is None else reason,
+            risk=output.risk, source=source,
+        )
 
     def _save_to_cache(
         self,
@@ -515,18 +533,18 @@ class AnalysisEngine:
         ai_model = cached.get("ai_model", "")
         m = re.search(r"\(([^)]+)\)", ai_model)
         orig = m.group(1) if m else ""
-        return {
-            "path": fi.path, "name": fi.name, "size": fi.size, "size_mb": fi.size_mb,
-            "extension": fi.extension, "mtime": fi.mtime,
-            "decision": cached["decision"], "confidence": cached["confidence"],
-            "reason": cached.get("reason", ""), "risk": cached.get("risk", "none"),
-            "source": f"{orig}+cache" if orig else "cache",
-        }
+        return AnalysisResult(
+            path=fi.path, name=fi.name, size=fi.size, size_mb=fi.size_mb,
+            extension=fi.extension, mtime=fi.mtime,
+            decision=cached["decision"], confidence=cached["confidence"],
+            reason=cached.get("reason", ""), risk=cached.get("risk", "none"),
+            source=f"{orig}+cache" if orig else "cache", cached=True,
+        )
 
-    def _rule_to_result(self, fi: FileInfo, match) -> dict:
-        return {
-            "path": fi.path, "name": fi.name, "size": fi.size, "size_mb": fi.size_mb,
-            "extension": fi.extension, "mtime": fi.mtime,
-            "decision": match.decision, "confidence": match.confidence,
-            "reason": match.reason, "risk": "none", "source": "rule",
-        }
+    def _rule_to_result(self, fi: FileInfo, match) -> AnalysisResult:
+        return AnalysisResult(
+            path=fi.path, name=fi.name, size=fi.size, size_mb=fi.size_mb,
+            extension=fi.extension, mtime=fi.mtime,
+            decision=match.decision, confidence=match.confidence,
+            reason=match.reason, risk="none", source="rule",
+        )

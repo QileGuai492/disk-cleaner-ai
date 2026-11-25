@@ -5,6 +5,7 @@ import json
 import pytest
 from disk_cleaner.analyzer.ai_client import (
     AIProvider,
+    AIUnavailableError,
     FileAnalysisInput,
     FileAnalysisOutput,
     parse_ai_response,
@@ -180,3 +181,30 @@ class TestAIProvider:
     def test_ollama不需要api_key(self):
         provider = AIProvider.create("ollama", model="qwen2.5:1.5b")
         assert provider.provider_name == "ollama"
+
+    def test_预算用尽时快速失败(self):
+        provider = AIProvider.create("openai", api_key="sk-test", budget_usd=0.01)
+        provider._budget_used = 0.02
+        with pytest.raises(AIUnavailableError, match="预算"):
+            provider.analyze("test")
+
+    def test_连续失败熔断(self):
+        provider = AIProvider.create("openai", api_key="sk-test")
+        provider._consecutive_failures = 3
+        with pytest.raises(AIUnavailableError, match="熔断"):
+            provider.analyze("test")
+
+    def test_按费率记录用量(self):
+        provider = AIProvider.create(
+            "openai",
+            api_key="sk-test",
+            input_cost_per_million=1.0,
+            output_cost_per_million=2.0,
+        )
+        provider._record_usage(1_000_000, 500_000)
+        assert provider.stats["total_tokens"] == 1_500_000
+        assert provider.stats["budget_used"] == pytest.approx(2.0)
+
+    def test_timeout_有下限(self):
+        provider = AIProvider.create("openai", api_key="sk-test", timeout_seconds=0.1)
+        assert provider.timeout_seconds >= 1.0

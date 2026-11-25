@@ -234,18 +234,34 @@ class AIProvider:
         "判断文件是否可以安全删除。只返回 JSON，不要有其他内容。"
     )
 
-    def __init__(self, provider_name: str, api_key: str = "", model: str = "",
-                 max_retries: int = 3, rate_limit_rpm: int = 30, **kwargs):
+    def __init__(
+        self,
+        provider_name: str,
+        api_key: str = "",
+        model: str = "",
+        max_retries: int = 3,
+        rate_limit_rpm: int = 30,
+        timeout_seconds: float = 30.0,
+        budget_usd: float = 0.0,
+        input_cost_per_million: float = 0.0,
+        output_cost_per_million: float = 0.0,
+        **kwargs,
+    ):
         self.provider_name = provider_name
         self.api_key = api_key
         self.model = model
         self.kwargs = kwargs
-        self.max_retries = max_retries
-        self.rate_limit_rpm = rate_limit_rpm
+        self.max_retries = max(1, int(max_retries))
+        self.rate_limit_rpm = max(1, int(rate_limit_rpm))
+        self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.budget_usd = max(0.0, float(budget_usd))
+        self.input_cost_per_million = max(0.0, float(input_cost_per_million))
+        self.output_cost_per_million = max(0.0, float(output_cost_per_million))
         self._call_times: list[float] = []
         self._total_calls = 0
         self._total_tokens = 0
         self._budget_used = 0.0
+        self._consecutive_failures = 0
 
     @classmethod
     def create(cls, provider: str, api_key: str = "", model: str = "", **kwargs) -> "AIProvider":
@@ -261,6 +277,8 @@ class AIProvider:
             "total_calls": self._total_calls,
             "total_tokens": self._total_tokens,
             "budget_used": self._budget_used,
+            "budget_usd": self.budget_usd,
+            "consecutive_failures": self._consecutive_failures,
         }
 
     def _get_key(self) -> str:
@@ -294,6 +312,13 @@ class AIProvider:
         if self.provider_name in ("openai", "claude", "deepseek", "gemini") and not self.api_key:
             raise AIUnavailableError(f"{self.provider_name} 未配置 API Key")
 
+        if self.budget_usd > 0 and self._budget_used >= self.budget_usd:
+            raise AIUnavailableError(
+                f"AI 预算已用尽（{self._budget_used:.4f}/{self.budget_usd:.4f} USD）"
+            )
+        if self._consecutive_failures >= 3:
+            raise AIUnavailableError("连续多次调用失败，已熔断；请检查网络、Key 或模型名")
+
         self._rate_limit()
         last_error = ""
 
@@ -314,14 +339,17 @@ class AIProvider:
 
                 if result and result.strip():
                     self._total_calls += 1
+                    self._consecutive_failures = 0
                     return result
                 last_error = "空响应"
 
             except AIUnavailableError:
+                self._consecutive_failures += 1
                 raise
             except Exception as e:
                 last_error = str(e)
                 if self._is_non_retryable(e):
+                    self._consecutive_failures += 1
                     raise AIUnavailableError(
                         f"{self.provider_name} 调用失败（不可重试）: {last_error}"
                     ) from e
@@ -329,8 +357,19 @@ class AIProvider:
                     wait = 2 ** attempt  # 指数退避: 1s, 2s, 4s
                     time.sleep(wait)
 
+        self._consecutive_failures += 1
         raise AIUnavailableError(
             f"{self.provider_name} 调用失败（{self.max_retries} 次重试）: {last_error}"
+        )
+
+    def _record_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        """记录 token 与按配置费率估算的费用。"""
+        prompt_tokens = max(0, int(prompt_tokens or 0))
+        completion_tokens = max(0, int(completion_tokens or 0))
+        self._total_tokens += prompt_tokens + completion_tokens
+        self._budget_used += (
+            prompt_tokens / 1_000_000 * self.input_cost_per_million
+            + completion_tokens / 1_000_000 * self.output_cost_per_million
         )
 
     @staticmethod
@@ -371,7 +410,7 @@ class AIProvider:
             raise AIUnavailableError("openai 未安装") from e
         if not self.api_key:
             raise AIUnavailableError("openai 未配置 API Key")
-        client = openai.OpenAI(api_key=self.api_key)
+        client = openai.OpenAI(api_key=self.api_key, timeout=self.timeout_seconds)
         response = client.chat.completions.create(
             model=self.model,
             messages=[
@@ -382,14 +421,12 @@ class AIProvider:
             max_tokens=500,
         )
         content = response.choices[0].message.content or ""
-        # 估算 token 和费用
-        if hasattr(response, "usage"):
-            self._total_tokens += response.usage.total_tokens
-            # GPT-4o-mini: ~$0.15/1M input, ~$0.60/1M output
-            if "4o-mini" in self.model:
-                cost = response.usage.prompt_tokens * 0.15 / 1_000_000
-                cost += response.usage.completion_tokens * 0.60 / 1_000_000
-                self._budget_used += cost
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self._record_usage(
+                getattr(usage, "prompt_tokens", 0),
+                getattr(usage, "completion_tokens", 0),
+            )
         if not content.strip():
             raise AIUnavailableError("OpenAI 返回空响应")
         return content
@@ -410,6 +447,7 @@ class AIProvider:
         client = openai.OpenAI(
             api_key=key,
             base_url="https://api.deepseek.com",
+            timeout=self.timeout_seconds,
         )
         response = client.chat.completions.create(
             model=self.model or "deepseek-v4-flash",
@@ -421,6 +459,12 @@ class AIProvider:
             max_tokens=500,
         )
         content = response.choices[0].message.content or ""
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self._record_usage(
+                getattr(usage, "prompt_tokens", 0),
+                getattr(usage, "completion_tokens", 0),
+            )
         if not content.strip():
             raise AIUnavailableError("DeepSeek 返回空响应")
         return content
@@ -443,11 +487,16 @@ class AIProvider:
                 "contents": [{"parts": [{"text": self.SYSTEM_PROMPT + "\n\n" + prompt}]}],
                 "generationConfig": {"temperature": 0.1, "maxOutputTokens": 500},
             },
-            timeout=30,
+            timeout=self.timeout_seconds,
         )
         if resp.status_code != 200:
             raise AIUnavailableError(f"Gemini HTTP {resp.status_code}: {resp.text[:200]}")
         data = resp.json()
+        usage = data.get("usageMetadata") or {}
+        self._record_usage(
+            usage.get("promptTokenCount", 0),
+            usage.get("candidatesTokenCount", 0),
+        )
         try:
             text = data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as e:
@@ -465,13 +514,19 @@ class AIProvider:
         if not self.api_key:
             raise AIUnavailableError("claude 未配置 API Key")
 
-        client = anthropic.Anthropic(api_key=self.api_key)
+        client = anthropic.Anthropic(api_key=self.api_key, timeout=self.timeout_seconds)
         response = client.messages.create(
             model=self.model,
             max_tokens=500,
             system=self.SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self._record_usage(
+                getattr(usage, "input_tokens", 0),
+                getattr(usage, "output_tokens", 0),
+            )
         text = response.content[0].text if response.content else ""
         if not text.strip():
             raise AIUnavailableError("Claude 返回空响应")
@@ -486,14 +541,14 @@ class AIProvider:
 
         try:
             # 快速检测 Ollama 是否在运行（只建连接，不实际推理）
-            requests.get("http://localhost:11434/api/tags", timeout=1)
+            requests.get("http://localhost:11434/api/tags", timeout=min(2.0, self.timeout_seconds))
         except Exception as e:
             raise AIUnavailableError("Ollama 未运行或不可访问") from e
 
         response = requests.post(
             "http://localhost:11434/api/generate",
             json={"model": self.model, "prompt": prompt, "stream": False},
-            timeout=5,
+            timeout=min(self.timeout_seconds, 60.0),
         )
         if response.status_code != 200:
             raise AIUnavailableError(f"Ollama HTTP {response.status_code}: {response.text[:200]}")

@@ -58,6 +58,7 @@ disk-cleaner analyze C:\Users --force
 ```
 
 > 云端调用前会对路径脱敏；`.env`、`.pem`、`.key` 等扩展名不会上云。AI 未配置或调用失败时，来源会显示“本地降级”，不会伪装成 AI，也不会写入 AI 缓存。
+> 连续 3 次失败会熔断；配置 `ai.budget_usd` 后，预算用尽也会显式降级。
 
 输出示例：
 ```
@@ -304,6 +305,10 @@ disk-cleaner config path      # 显示配置文件路径
     "model": "",
     "max_retries": 3,
     "rate_limit_rpm": 30,
+    "timeout_seconds": 30,
+    "budget_usd": 0,
+    "input_cost_per_million": 0,
+    "output_cost_per_million": 0,
     "cloud_blocklist": []
   },
   "privacy": { "level": "strict" },
