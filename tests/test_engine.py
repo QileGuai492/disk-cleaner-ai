@@ -115,6 +115,41 @@ class TestAnalysisEngine:
         assert total_reclaimable >= 0
 
 
+class TestRuleLearningAndForce:
+    """规则沉淀与 force 语义测试。"""
+
+    def test_学习扩展名规则(self, db):
+        engine = AnalysisEngine(db, ai_provider="local")
+        results = [
+            {"path": f"/tmp/sample_{i}.csv", "decision": "safe_to_delete",
+             "confidence": 1.0, "source": "ai"}
+            for i in range(10)
+        ]
+        new_rules = engine._learn_from_results(results)
+        assert any(rule.pattern == "*.csv" for rule in new_rules)
+
+    def test_规则写入数据库并在新引擎加载(self, db):
+        engine = AnalysisEngine(db, ai_provider="local")
+        results = [
+            {"path": f"/tmp/sample_{i}.csv", "decision": "safe_to_delete",
+             "confidence": 1.0, "source": "ai"}
+            for i in range(10)
+        ]
+        engine._learn_from_results(results)
+
+        engine2 = AnalysisEngine(db, ai_provider="local")
+        assert any(rule.pattern == "*.csv" for rule in engine2.rules.rules)
+
+    def test_force仍然走规则(self, engine, temp_dir):
+        results = engine.analyze_directory(str(temp_dir), top_n=20, force=True)
+        assert any(r.get("source") == "rule" for r in results)
+
+    def test_流式force仍然走规则(self, engine, temp_dir):
+        events = list(engine.analyze_directory_stream(str(temp_dir), top_n=20, force=True))
+        results = [e["result"] for e in events if e["type"] == "result"]
+        assert any(r.get("source") == "rule" for r in results)
+
+
 class TestEngineCacheIntegration:
     """缓存集成测试"""
 

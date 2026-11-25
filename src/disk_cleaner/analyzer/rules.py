@@ -180,7 +180,7 @@ class RuleEngine:
             confidence = top_count / total
             if confidence >= 0.95 and top_decision in ("safe_to_delete", "likely_safe"):
                 new_rules.append(Rule(
-                    pattern=f"*.{ext}", decision=top_decision,
+                    pattern=f"*{ext}", decision=top_decision,
                     confidence=round(confidence, 2), source="ai_learned",
                 ))
 

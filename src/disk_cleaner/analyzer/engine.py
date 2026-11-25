@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from disk_cleaner.scanner.walker import FileInfo, scan_directory
-from disk_cleaner.analyzer.rules import RuleEngine
+from disk_cleaner.analyzer.rules import Rule, RuleEngine
 from disk_cleaner.analyzer.profiler import ContentProfiler
 from disk_cleaner.analyzer.ai_client import (
     AIProvider,
@@ -39,6 +39,7 @@ class AnalysisEngine:
         self.cache = AnalysisCache(db)
         self.rules = RuleEngine()
         self.rules.add_builtin_rules()
+        self._load_persisted_rules()
         self.profiler = ContentProfiler()
         self.fingerprints = FingerprintDB()
         self.ai_provider = ai_provider
@@ -58,8 +59,54 @@ class AnalysisEngine:
             "rule_hits": 0,
             "ai_calls": 0,
             "degraded": 0,
+            "learned": 0,
             "total": 0,
         }
+
+    def _load_persisted_rules(self) -> None:
+        """从 SQLite 加载用户/AI 沉淀的规则。"""
+        try:
+            rows = self.db.get_rules()
+        except Exception:
+            return
+        for row in rows:
+            try:
+                self.rules.add_rule(Rule(
+                    pattern=row["pattern"],
+                    decision=row["decision"],
+                    confidence=float(row.get("confidence") or 0.9),
+                    priority=int(row.get("priority") or 0),
+                    source=row.get("source") or "builtin",
+                ))
+            except Exception:
+                continue
+
+    def _learn_from_results(self, results: list[dict]) -> list:
+        """从高置信结果中沉淀规则，并写入数据库。"""
+        learnable = [
+            r for r in results
+            if r.get("source") in ("ai", "rule")
+            and r.get("decision") in ("safe_to_delete", "likely_safe")
+            and float(r.get("confidence") or 0) >= 0.90
+        ]
+        try:
+            new_rules = self.rules.learn_from_results(learnable, threshold=10)
+        except Exception:
+            return []
+        for rule in new_rules:
+            try:
+                self.db.save_rule(
+                    pattern=rule.pattern,
+                    decision=rule.decision,
+                    confidence=rule.confidence,
+                    source=rule.source,
+                    priority=rule.priority,
+                )
+            except Exception:
+                pass
+        if new_rules:
+            self._stats["learned"] = self._stats.get("learned", 0) + len(new_rules)
+        return new_rules
 
     def _begin_run(self) -> None:
         """每次分析开始重置取消标记与统计，避免跨请求污染。"""
@@ -168,6 +215,7 @@ class AnalysisEngine:
             parent = os.path.dirname(rel)
             return (depth, parent, decision_order.get(r["decision"], 2), -r["size"])
         results.sort(key=_sort_key)
+        self._learn_from_results(results)
         return results
 
     def analyze_directory_stream(
@@ -204,41 +252,56 @@ class AnalysisEngine:
         if not file_infos:
             return
 
-        # 第一遍：缓存命中 + 规则匹配直接 yield
-        needs_ai: list[FileInfo] = []
+        # 第一遍：缓存命中直接 yield；其余（含 force）进入规则层
+        needs_rules: list[FileInfo] = []
+        learnable_results: list[dict] = []
         for fi in file_infos:
             if self._cancelled:
                 yield {"type": "cancelled", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total}
                 return
             if force:
-                needs_ai.append(fi)
+                needs_rules.append(fi)
                 continue
             mtime_int = int(fi.mtime)
             cached = self.cache.get(fi.path, mtime_int, fi.size)
             if cached:
                 reason = cached.get("reason", "")
                 if "AI 响应格式异常" in reason or "响应被截断" in reason:
-                    needs_ai.append(fi)
+                    needs_rules.append(fi)
                     continue
                 self._stats["cache_hits"] += 1
-                yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": self._cache_to_result(fi, cached)}
+                result = self._cache_to_result(fi, cached)
+                learnable_results.append(result)
+                yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": result}
                 continue
+            needs_rules.append(fi)
+
+        # 第二遍：规则匹配；force 只跳过缓存，不跳过规则
+        needs_ai: list[FileInfo] = []
+        for fi in needs_rules:
+            if self._cancelled:
+                yield {"type": "cancelled", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total}
+                return
             match = self.rules.evaluate(fi)
             if match and match.confidence >= 0.85:
                 self._stats["rule_hits"] += 1
                 result = self._rule_to_result(fi, match)
                 self._save_to_cache(fi, match.decision, match.confidence, match.reason, "rule")
+                learnable_results.append(result)
                 yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": result}
                 continue
             needs_ai.append(fi)
 
-        # 第二遍：AI 分析，逐文件 yield
+        # 第三遍：AI/本地分析，逐文件 yield
         for fi in needs_ai:
             if self._cancelled:
                 yield {"type": "cancelled", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total}
                 return
             ai_result = self._analyze_single(fi)
+            learnable_results.append(ai_result)
             yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": ai_result}
+
+        self._learn_from_results(learnable_results)
 
     def relocate_analysis(self, path: str) -> list[dict]:
         """搬迁分析——识别可搬到 D 盘的大文件"""
