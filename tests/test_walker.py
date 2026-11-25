@@ -82,8 +82,9 @@ class TestScanDirectory:
     def test_按大小降序排列(self, temp_dir):
         results = scan_directory(str(temp_dir))
         sizes = [r.size for r in results]
-        # 根目录文件在前（全部收集）、子目录文件在后，各自按大小降序
-        assert sizes == [5000, 2500, 0, 10000]
+        # 全局按大小降序，不再把根目录文件强行排在子目录前面
+        assert sizes == sorted(sizes, reverse=True)
+        assert set(sizes) == {5000, 2500, 0, 10000}
 
     def test_提取文件大小(self, temp_dir):
         results = scan_directory(str(temp_dir))
@@ -121,6 +122,16 @@ class TestScanDirectory:
     def test_top_n限制返回数量(self, temp_dir):
         results = scan_directory(str(temp_dir), top_n=2)
         assert len(results) == 2
+
+    def test_top_n是全局最大文件(self, temp_dir):
+        results = scan_directory(str(temp_dir), top_n=2)
+        assert [r.size for r in results] == [10000, 5000]
+
+    def test_目录上限会报告截断(self, temp_dir):
+        results, skipped = scan_directory(
+            str(temp_dir), max_dirs=1, collect_errors=True
+        )
+        assert any("上限" in item["reason"] for item in skipped)
 
     def test_min_size过滤小文件(self, temp_dir):
         # 只返回 > 5KB 的文件

@@ -47,94 +47,99 @@ def scan_directory(
     *,
     top_n: Optional[int] = None,
     min_size: int = 0,
-    skip_symlinks: bool = False,
+    skip_symlinks: bool = True,
     recursive: bool = True,
     collect_errors: bool = False,
+    max_dirs: Optional[int] = 5000,
 ) -> list[FileInfo] | tuple[list[FileInfo], list[dict]]:
-    """扫描目录，返回 FileInfo 列表（按大小降序）
+    """扫描目录，返回 FileInfo 列表（按大小降序）。
+
+    使用单次 scandir 递归，避免 os.walk + scandir 的重复遍历；
+    top_n 对全树生效，保证返回的是真正的最大 N 个文件。
 
     Args:
         path: 要扫描的目录路径
         top_n: 只返回最大的 N 个文件
         min_size: 过滤小于此大小的文件（字节）
-        skip_symlinks: 是否跳过符号链接
+        skip_symlinks: 是否跳过符号链接/Junction（默认跳过）
         recursive: 是否递归扫描子目录
         collect_errors: 是否收集跳过/错误信息
+        max_dirs: 最多扫描的目录数；None 表示不限制。超出时会记录 skipped。
 
     Returns:
         如果 collect_errors=False，直接返回 FileInfo 列表
-        如果 collect_errors=True，返回 (FileInfo 列表, 跳過详情列表)
+        如果 collect_errors=True，返回 (FileInfo 列表, 跳过详情列表)
     """
     if not os.path.isdir(path):
         raise FileNotFoundError(f"目录不存在: {path}")
 
     results: list[FileInfo] = []
     skipped: list[dict] = []
-    root_files: list[FileInfo] = []
     heap: list[tuple[int, int, FileInfo]] = []
-    _top_n = top_n
-    _sub_files: list[FileInfo] = []  # 无限制模式下的子目录文件
+    counter = 0
+    scanned_dirs = 0
+    truncated = False
 
-    def _collect(dirpath: str, is_root: bool = False) -> None:
+    stack = [os.path.abspath(path)]
+    while stack:
+        dirpath = stack.pop()
+        if max_dirs is not None and scanned_dirs >= max_dirs:
+            truncated = True
+            break
+        scanned_dirs += 1
+
         try:
-            entries = os.scandir(dirpath)
+            with os.scandir(dirpath) as entries:
+                for entry in entries:
+                    if skip_symlinks and entry.is_symlink():
+                        skipped.append({"path": entry.path, "reason": "符号链接"})
+                        continue
+
+                    try:
+                        if entry.is_dir(follow_symlinks=not skip_symlinks):
+                            if recursive:
+                                stack.append(entry.path)
+                            continue
+
+                        if not entry.is_file(follow_symlinks=not skip_symlinks):
+                            continue
+                        st = entry.stat(follow_symlinks=not skip_symlinks)
+                    except (OSError, PermissionError):
+                        skipped.append({"path": entry.path, "reason": "权限不足或文件已移动"})
+                        continue
+
+                    if st.st_size < min_size:
+                        continue
+
+                    fi = FileInfo(
+                        path=os.path.abspath(entry.path),
+                        size=st.st_size,
+                        mtime=st.st_mtime,
+                    )
+                    counter += 1
+                    if top_n is not None:
+                        heapq.heappush(heap, (fi.size, counter, fi))
+                        while len(heap) > top_n:
+                            heapq.heappop(heap)
+                    else:
+                        results.append(fi)
         except PermissionError:
             skipped.append({"path": dirpath, "reason": "权限不足"})
-            return
-        for entry in entries:
-            if not entry.is_file(follow_symlinks=not skip_symlinks):
-                continue
+            continue
+        except OSError:
+            skipped.append({"path": dirpath, "reason": "读取失败"})
+            continue
 
-            if skip_symlinks and entry.is_symlink():
-                skipped.append({"path": entry.path, "reason": "符号链接"})
-                continue
+    if truncated:
+        skipped.append({
+            "path": path,
+            "reason": f"目录数量超过上限 {max_dirs}，结果可能不完整",
+        })
 
-            try:
-                stat = entry.stat()
-            except (OSError, PermissionError):
-                skipped.append({"path": entry.path, "reason": "权限不足或文件已移动"})
-                continue
-
-            if stat.st_size < min_size:
-                continue
-
-            fi = FileInfo(
-                path=os.path.abspath(entry.path),
-                size=stat.st_size,
-                mtime=stat.st_mtime,
-            )
-            if is_root:
-                root_files.append(fi)
-            elif _top_n is not None:
-                heapq.heappush(heap, (fi.size, id(fi), fi))
-                while len(heap) > _top_n:
-                    heapq.heappop(heap)
-            else:
-                _sub_files.append(fi)
-
-    # 先扫描根目录——全部收集
-    _collect(path, is_root=True)
-
-    if recursive:
-        scanned_count = 0
-        for dirpath, dirnames, filenames in os.walk(path, followlinks=not skip_symlinks):
-            if os.path.abspath(dirpath) == os.path.abspath(path):
-                continue  # 跳过根目录
-            _collect(dirpath)
-            scanned_count += 1
-            if scanned_count > 500:
-                break
-
-    # 合并：根目录全量 + 子目录堆提取 + 无限制模式子目录
-    root_files.sort(key=lambda x: x.size, reverse=True)
-    if _top_n is not None:
-        sub_heap = sorted([h[2] for h in heap], key=lambda x: x.size, reverse=True)
-        results = root_files + sub_heap
-        if len(results) > _top_n:
-            results = results[:_top_n]
+    if top_n is not None:
+        results = sorted((item[2] for item in heap), key=lambda x: x.size, reverse=True)
     else:
-        _sub_files.sort(key=lambda x: x.size, reverse=True)
-        results = root_files + _sub_files
+        results.sort(key=lambda x: x.size, reverse=True)
 
     if collect_errors:
         return results, skipped
