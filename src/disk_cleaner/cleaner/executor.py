@@ -9,6 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from disk_cleaner.cleaner.plan import CleanPlan
+from disk_cleaner.cleaner.safety import SafetyPolicy
+
 
 @dataclass
 class CleanResult:
@@ -119,10 +122,13 @@ class BackupManager:
 
         data = json.loads(manifest.read_text(encoding="utf-8"))
         results = []
+        remaining = []
         for file_info in data.get("files", []):
             src = Path(file_info["backup_path"])
             dest = Path(file_info["original_path"])
             try:
+                if dest.exists():
+                    raise FileExistsError(f"目标已存在，未覆盖：{dest}")
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(src), str(dest))
                 results.append(CleanResult(
@@ -130,10 +136,14 @@ class BackupManager:
                     bytes_freed=file_info["size"], action="restored",
                 ))
             except Exception as e:
+                remaining.append(file_info)
                 results.append(CleanResult(
                     path=file_info["original_path"], success=False,
                     bytes_freed=0, action="failed", error=str(e),
                 ))
+        # 已恢复的条目从 manifest 移除，避免二次恢复重复搬运
+        data["files"] = remaining
+        manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return results
 
     def delete_batch(self, batch_id: str) -> bool:
@@ -144,16 +154,48 @@ class BackupManager:
             return True
         return False
 
+    def file_count(self, batch_id: str) -> int:
+        """返回批次中仍待恢复的文件数量。"""
+        manifest = self.backup_root / batch_id / "manifest.json"
+        if not manifest.exists():
+            return 0
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            return len(data.get("files", []))
+        except Exception:
+            return 0
+
     def prune_expired(self) -> int:
-        """清理过期的备份批次，返回清理的批次数量"""
-        cutoff = time.time() - self.retention_days * 86400
+        """清理过期的备份批次，返回清理的批次数量。
+
+        优先使用 manifest 中的 expires_at，其次 created_at + retention_days，
+        最后才退回目录 mtime，避免用户复制/移动目录后过期时间失真。
+        """
+        now = time.time()
         count = 0
         for d in self.backup_root.iterdir():
             if not d.is_dir():
                 continue
             try:
-                mtime = d.stat().st_mtime
-                if mtime < cutoff:
+                expires_at = None
+                manifest = d / "manifest.json"
+                if manifest.exists():
+                    data = json.loads(manifest.read_text(encoding="utf-8"))
+                    raw = data.get("expires_at")
+                    if raw:
+                        try:
+                            expires_at = datetime.fromisoformat(raw).timestamp()
+                        except ValueError:
+                            expires_at = None
+                    if expires_at is None and data.get("created_at"):
+                        try:
+                            created = datetime.fromisoformat(data["created_at"]).timestamp()
+                            expires_at = created + self.retention_days * 86400
+                        except ValueError:
+                            expires_at = None
+                if expires_at is None:
+                    expires_at = d.stat().st_mtime + self.retention_days * 86400
+                if expires_at < now:
                     shutil.rmtree(str(d))
                     count += 1
             except Exception:
@@ -164,10 +206,17 @@ class BackupManager:
 class CleanExecutor:
     """清理执行器——统一入口"""
 
-    def __init__(self, backup_dir: str = "~/disk-cleaner-backup"):
+    def __init__(
+        self,
+        backup_dir: str = "~/disk-cleaner-backup",
+        policy: SafetyPolicy | None = None,
+    ):
         self.backup_dir = os.path.expanduser(backup_dir)
         self.backup_manager = BackupManager(self.backup_dir)
+        self.policy = policy or SafetyPolicy()
         self._keep_patterns: list[str] = []
+        self.last_batch_id = ""
+        self.last_plan: CleanPlan | None = None
 
     def add_keep_list(self, patterns: list[str]) -> None:
         """添加白名单模式（匹配的文件不会被清理）"""
@@ -182,31 +231,95 @@ class CleanExecutor:
                 return True
         return False
 
-    def clean(
-        self, file_paths: list[str], mode: str = "backup"
-    ) -> list[CleanResult]:
-        """执行清理操作
+    @staticmethod
+    def _same_volume(path: str, other: str) -> bool:
+        """判断两个路径是否位于同一个盘符/卷。"""
+        try:
+            return os.path.splitdrive(os.path.abspath(path))[0].lower() == os.path.splitdrive(
+                os.path.abspath(other)
+            )[0].lower()
+        except Exception:
+            return False
 
-        Args:
-            file_paths: 要清理的文件路径列表
-            mode: backup（移到备份区）/ recycle（回收站）/ permanent（永久删除）
-
-        Returns:
-            每个文件的清理结果
-        """
-        results: list[CleanResult] = []
-
-        batch_id = self.backup_manager.create_batch("cleanup") if mode in ("backup", "recycle") else ""
+    def plan(
+        self,
+        file_paths: list[str],
+        mode: str = "backup",
+        scan_root: str | None = None,
+    ) -> CleanPlan:
+        """生成清理计划：先做安全策略校验，不执行任何删除。"""
+        valid: list[str] = []
+        rejected: list[dict] = []
+        seen: set[str] = set()
 
         for fp in file_paths:
-            # 白名单检查
-            if self._should_keep(fp):
-                results.append(CleanResult(
-                    path=fp, success=False, bytes_freed=0,
-                    action="skipped", error="白名单保护",
-                ))
+            absolute = os.path.abspath(str(fp))
+            if absolute in seen:
                 continue
+            seen.add(absolute)
 
+            decision = self.policy.validate(absolute, scan_root=scan_root)
+            if not decision.allowed:
+                rejected.append({"path": absolute, "reason": decision.reason})
+                continue
+            if self._should_keep(absolute):
+                rejected.append({"path": absolute, "reason": "白名单保护"})
+                continue
+            valid.append(absolute)
+
+        total_bytes = 0
+        for fp in valid:
+            try:
+                if os.path.isfile(fp):
+                    total_bytes += os.path.getsize(fp)
+            except OSError:
+                pass
+
+        warnings: list[str] = []
+        if valid and mode in ("backup", "recycle") and self._same_volume(valid[0], self.backup_dir):
+            warnings.append(
+                "备份目录与待清理文件在同一个分区，移动到备份区不会立即释放磁盘空间；"
+                "需要删除备份后才会真正释放。"
+            )
+
+        plan = CleanPlan(
+            paths=valid,
+            mode=mode,
+            backup_dir=self.backup_dir,
+            total_bytes=total_bytes,
+            warnings=warnings,
+            rejected=rejected,
+        )
+        self.last_plan = plan
+        return plan
+
+    def execute(self, plan: CleanPlan) -> list[CleanResult]:
+        """执行一个已经通过安全策略的清理计划。"""
+        self.last_plan = plan
+        self.last_batch_id = ""
+
+        results: list[CleanResult] = [
+            CleanResult(
+                path=r["path"], success=False, bytes_freed=0,
+                action="skipped", error=r["reason"],
+            )
+            for r in plan.rejected
+        ]
+        if not plan.paths:
+            return results
+
+        # 每次真实清理前顺带清理过期备份
+        self.backup_manager.prune_expired()
+
+        batch_id = ""
+
+        def ensure_batch() -> str:
+            nonlocal batch_id
+            if not batch_id:
+                batch_id = self.backup_manager.create_batch("cleanup")
+            return batch_id
+
+        for fp in plan.paths:
             path = Path(fp)
             if not path.exists():
                 results.append(CleanResult(
@@ -215,19 +328,25 @@ class CleanExecutor:
                 ))
                 continue
 
-            file_size = path.stat().st_size
+            try:
+                file_size = path.stat().st_size
+            except OSError as e:
+                results.append(CleanResult(
+                    path=fp, success=False, bytes_freed=0,
+                    action="failed", error=str(e),
+                ))
+                continue
 
             try:
-                if mode == "backup":
-                    result = self.backup_manager.backup_file(fp, batch_id)
-                elif mode == "permanent":
+                if plan.mode == "backup":
+                    result = self.backup_manager.backup_file(fp, ensure_batch())
+                elif plan.mode == "permanent":
                     os.unlink(fp)
                     result = CleanResult(
                         path=fp, success=True, bytes_freed=file_size,
                         action="permanently_deleted",
                     )
-                else:
-                    # recycle: 使用系统回收站
+                elif plan.mode == "recycle":
                     try:
                         import send2trash
                         send2trash.send2trash(fp)
@@ -236,8 +355,13 @@ class CleanExecutor:
                             action="sent_to_recycle_bin",
                         )
                     except ImportError:
-                        # 降级为移动到备份区
-                        result = self.backup_manager.backup_file(fp, batch_id)
+                        # 没有 send2trash 时降级到备份区，但仍按实际动作记录
+                        result = self.backup_manager.backup_file(fp, ensure_batch())
+                else:
+                    result = CleanResult(
+                        path=fp, success=False, bytes_freed=0,
+                        action="failed", error=f"未知清理模式: {plan.mode}",
+                    )
                 results.append(result)
             except Exception as e:
                 results.append(CleanResult(
@@ -245,21 +369,44 @@ class CleanExecutor:
                     action="failed", error=str(e),
                 ))
 
+        # 全部失败时不留下空批次
+        if batch_id and self.backup_manager.file_count(batch_id) == 0:
+            self.backup_manager.delete_batch(batch_id)
+            batch_id = ""
+
+        self.last_batch_id = batch_id
         return results
 
+    def clean(
+        self, file_paths: list[str], mode: str = "backup"
+    ) -> list[CleanResult]:
+        """执行清理操作（兼容旧接口，内部先生成计划再执行）。"""
+        plan = self.plan(file_paths, mode=mode)
+        return self.execute(plan)
+
     def estimate_freed_space(self, file_paths: list[str]) -> int:
-        """估算清理后释放的总空间"""
+        """估算清理后释放的总空间（受安全策略保护）。"""
         total = 0
         for fp in file_paths:
-            if self._should_keep(fp):
+            absolute = os.path.abspath(str(fp))
+            if not self.policy.validate(absolute).allowed:
                 continue
-            path = Path(fp)
-            if path.exists():
-                total += path.stat().st_size
+            if self._should_keep(absolute):
+                continue
+            try:
+                if os.path.isfile(absolute):
+                    total += os.path.getsize(absolute)
+            except OSError:
+                pass
         return total
 
     def get_summary(self, results: list[CleanResult]) -> dict:
-        """获取清理结果摘要"""
+        """获取清理结果摘要。
+
+        total_freed 保留旧语义（成功项的文件大小总和）；
+        total_moved 表示移入备份区的字节数；
+        total_freed_real 表示立即释放的字节数（仅永久删除）。
+        """
         success = [r for r in results if r.success]
         failed = [r for r in results if not r.success]
         return {
@@ -267,4 +414,10 @@ class CleanExecutor:
             "success_count": len(success),
             "failed_count": len(failed),
             "total_freed": sum(r.bytes_freed for r in success),
+            "total_moved": sum(
+                r.bytes_freed for r in success if r.action == "moved_to_backup"
+            ),
+            "total_freed_real": sum(
+                r.bytes_freed for r in success if r.action == "permanently_deleted"
+            ),
         }

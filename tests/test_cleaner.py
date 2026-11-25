@@ -167,3 +167,38 @@ class TestCleanExecutor:
         files = [str(temp_dir / "file_to_clean.tmp")]
         results = executor.clean(files, mode="backup")
         assert new_backup.exists()
+
+    def test_清理后返回批次号(self, temp_dir, backup_root):
+        executor = CleanExecutor(backup_dir=str(backup_root))
+        results = executor.clean([str(temp_dir / "file_to_clean.tmp")], mode="backup")
+        assert results[0].success
+        assert executor.last_batch_id
+        assert executor.backup_manager.file_count(executor.last_batch_id) == 1
+
+    def test_恢复后从清单移除(self, backup_root, temp_dir):
+        manager = BackupManager(str(backup_root))
+        batch_id = manager.create_batch("test")
+        manager.backup_file(str(temp_dir / "file_to_clean.tmp"), batch_id)
+
+        first = manager.restore_batch(batch_id)
+        assert first[0].success
+        assert manager.file_count(batch_id) == 0
+
+        # 二次恢复不应重复搬运，也不应报成功
+        second = manager.restore_batch(batch_id)
+        assert second == []
+
+    def test_过期判断优先使用清单时间(self, backup_root, temp_dir):
+        import json
+
+        manager = BackupManager(str(backup_root))
+        batch_id = manager.create_batch("expired")
+        manager.backup_file(str(temp_dir / "file_to_clean.tmp"), batch_id)
+
+        manifest = backup_root / batch_id / "manifest.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        data["expires_at"] = "2000-01-01T00:00:00"
+        manifest.write_text(json.dumps(data), encoding="utf-8")
+
+        assert manager.prune_expired() == 1
+        assert not (backup_root / batch_id).exists()
