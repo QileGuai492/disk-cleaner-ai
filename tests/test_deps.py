@@ -72,8 +72,8 @@ class TestDependencyAnalyzer:
         assert len(analyzer.imports) >= 1
 
     def test_反向索引查询真实DLL(self, analyzer):
-        # kernel32.dll 被几乎所有 exe/dll 引用
-        refs = analyzer.get_referrers("kernel32.dll")
+        # 现代 Windows 的 kernel32 通常走 kernelbase/ntdll；用 ntdll 验证真实导入表
+        refs = analyzer.get_referrers("ntdll.dll")
         assert len(refs) >= 1
 
     def test_孤立DLL无引用(self, analyzer):

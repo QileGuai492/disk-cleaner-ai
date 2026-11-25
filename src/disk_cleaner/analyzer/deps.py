@@ -112,63 +112,88 @@ class DependencyAnalyzer:
         conn.close()
 
     def _parse_pe_imports(self, path: str) -> Optional[PEImports]:
-        """解析 PE 文件导入表"""
+        """解析 PE 文件导入表（真实 Import Directory，失败时回退字符串扫描）。"""
         try:
             with open(path, "rb") as f:
-                # 读取 DOS header
-                dos_header = f.read(64)
-                if len(dos_header) < 64 or dos_header[:2] != b"MZ":
-                    return PEImports(path=path)
+                data = f.read(32 * 1024 * 1024)
+            if len(data) < 64 or data[:2] != b"MZ":
+                return PEImports(path=path)
 
-                # 获取 PE signature 偏移
-                pe_offset = struct.unpack_from("<I", dos_header, 0x3C)[0]
-                f.seek(pe_offset)
+            pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
+            if pe_offset + 24 > len(data) or data[pe_offset:pe_offset + 4] != b"PE\x00\x00":
+                return PEImports(path=path)
 
-                # PE signature
-                pe_sig = f.read(4)
-                if pe_sig != b"PE\x00\x00":
-                    return PEImports(path=path)
+            coff = data[pe_offset + 4:pe_offset + 24]
+            if len(coff) < 20:
+                return PEImports(path=path)
+            num_sections = struct.unpack_from("<H", coff, 2)[0]
+            optional_size = struct.unpack_from("<H", coff, 16)[0]
+            optional_start = pe_offset + 24
+            if optional_start + 2 > len(data):
+                return self._fallback_imports(path, "可选头越界")
+            optional_magic = struct.unpack_from("<H", data, optional_start)[0]
 
-                # COFF header
-                coff = f.read(20)
-                if len(coff) < 20:
-                    return PEImports(path=path)
+            # PE32: data directories 从可选头 +96 开始；PE32+: +112
+            dirs_start = optional_start + (112 if optional_magic == 0x20B else 96)
+            if dirs_start + 16 > len(data):
+                return self._fallback_imports(path, "可选头越界")
 
-                # Optional header magic (PE32 or PE32+)
-                opt_magic = struct.unpack_from("<H", f.read(2), 0)[0]
+            import_rva, _import_size = struct.unpack_from("<II", data, dirs_start + 8)
+            if import_rva == 0:
+                return self._fallback_imports(path, "无导入表")
 
-                # Skip to data directories
-                if opt_magic == 0x20B:  # PE32+
-                    f.read(110)  # PE32+ 可选头总共 112 字节，已读 2 字节 magic
-                else:  # PE32
-                    f.read(94)  # PE32 可选头总共 96 字节，已读 2 字节 magic
-
-                # Data directories: [0]=Export, [1]=Import
-                data_dirs = f.read(16)  # Just need Import Directory (second entry)
-                # Actually we need 16 bytes for the first, then 8 more for import
-                # Let me read both properly
-                f.seek(-16, os.SEEK_CUR)  # Go back
-                f.read(8)  # Skip Export Directory RVA + Size
-                import_rva, import_size = struct.unpack("<II", f.read(8))
-
-                if import_rva == 0 or import_size == 0:
-                    # 导入表为空或无效，回退到字符串扫描
-                    return PEImports(
-                        path=path,
-                        is_pe=True,
-                        dll_imports=self._extract_dll_names_from_file(path),
-                    )
-
-                return PEImports(
-                    path=path,
-                    is_pe=True,
-                    dll_imports=self._extract_dll_names_from_file(path),
-                    parse_error=None,
+            sections = []
+            section_start = optional_start + optional_size
+            for index in range(min(num_sections, 96)):
+                offset = section_start + index * 40
+                if offset + 40 > len(data):
+                    break
+                virtual_size, virtual_address, raw_size, raw_pointer = struct.unpack_from(
+                    "<IIII", data, offset + 8
                 )
+                sections.append((virtual_address, max(virtual_size, raw_size), raw_pointer))
+
+            def rva_to_offset(rva: int) -> Optional[int]:
+                for virtual_address, size, raw_pointer in sections:
+                    if virtual_address <= rva < virtual_address + max(size, 1):
+                        return raw_pointer + (rva - virtual_address)
+                return None
+
+            descriptor_offset = rva_to_offset(import_rva)
+            if descriptor_offset is None:
+                return self._fallback_imports(path, "导入表 RVA 无法映射")
+
+            dlls: list[str] = []
+            for index in range(100):
+                offset = descriptor_offset + index * 20
+                if offset + 20 > len(data):
+                    break
+                name_rva = struct.unpack_from("<I", data, offset + 12)[0]
+                if name_rva == 0:
+                    break
+                name_offset = rva_to_offset(name_rva)
+                if name_offset is None or name_offset >= len(data):
+                    continue
+                end = data.find(b"\x00", name_offset, min(name_offset + 260, len(data)))
+                if end < 0:
+                    continue
+                name = data[name_offset:end].decode("ascii", errors="ignore").lower()
+                if name.endswith(".dll") and name not in dlls:
+                    dlls.append(name)
+
+            if not dlls:
+                return self._fallback_imports(path, "导入表为空")
+            return PEImports(path=path, is_pe=True, dll_imports=dlls[:200])
         except Exception as e:
             return PEImports(path=path, parse_error=str(e))
 
-        return PEImports(path=path)
+    def _fallback_imports(self, path: str, reason: str) -> PEImports:
+        return PEImports(
+            path=path,
+            is_pe=True,
+            dll_imports=self._extract_dll_names_from_file(path),
+            parse_error=reason,
+        )
 
     def _extract_dll_names_from_file(self, path: str) -> list[str]:
         """从 PE 文件中提取 DLL 名称（简化：扫描字符串中的 .dll 引用）"""

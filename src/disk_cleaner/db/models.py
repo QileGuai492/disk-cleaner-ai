@@ -145,6 +145,29 @@ class AnalysisCache:
         )
         self._db._conn.commit()
 
+    def upsert_many(self, entries: list[dict]) -> None:
+        """批量写入缓存，一次事务提交，减少逐文件 commit。"""
+        if not entries:
+            return
+        now = int(time.time())
+        rows = [
+            (
+                e["file_path"], int(e["mtime"]), int(e["size_bytes"]),
+                e["decision"], float(e.get("confidence") or 0.0),
+                e.get("reason", ""), e.get("risk", "none"),
+                e.get("cluster_id"), int(e.get("analyzed_at") or now),
+                e.get("ai_model", "unknown"),
+            )
+            for e in entries
+        ]
+        self._db._conn.executemany(
+            """INSERT OR REPLACE INTO analysis_cache
+               (file_path, mtime, size_bytes, decision, confidence, reason, risk, cluster_id, analyzed_at, ai_model)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            rows,
+        )
+        self._db._conn.commit()
+
     def get(self, file_path: str, mtime: int, size_bytes: int) -> Optional[dict]:
         """查询单条缓存"""
         row = self._db._conn.execute(

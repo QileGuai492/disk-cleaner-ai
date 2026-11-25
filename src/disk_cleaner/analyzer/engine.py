@@ -85,6 +85,7 @@ class AnalysisEngine:
         self.skip_symlinks = True if skip_symlinks is None else bool(skip_symlinks)
         self._ai: AIProvider | None = None
         self._local_ai = AIProvider.create("local", model="heuristic")
+        self._cache_buffer: list[dict] = []
         self._stats = self._new_stats()
         self._cancelled = False
 
@@ -148,6 +149,7 @@ class AnalysisEngine:
         """每次分析开始重置取消标记与统计，避免跨请求污染。"""
         self._stats = self._new_stats()
         self._cancelled = False
+        self._cache_buffer = []
 
     @property
     def ai(self) -> AIProvider:
@@ -208,8 +210,11 @@ class AnalysisEngine:
                 self._stats["rule_hits"] = 1
                 result = self._rule_to_result(fi, match)
                 self._save_to_cache(fi, match.decision, match.confidence, match.reason, "rule")
+                self._flush_cache()
                 return [result]
-            return [self._analyze_single(fi)]
+            result = self._analyze_single(fi)
+            self._flush_cache()
+            return [result]
         return self.analyze_directory(path, top_n=top_n, force=force, recursive=recursive)
 
     def analyze_directory(
@@ -277,6 +282,7 @@ class AnalysisEngine:
             parent = os.path.dirname(rel)
             return (depth, parent, decision_order.get(r["decision"], 2), -r["size"])
         results.sort(key=_sort_key)
+        self._flush_cache()
         self._learn_from_results(results)
         return results
 
@@ -304,6 +310,7 @@ class AnalysisEngine:
                         yield {"type": "result", "current": 1, "total": 1, "result": self._cache_to_result(fi, cached)}
                         return
             result = self._analyze_single(fi)
+            self._flush_cache()
             yield {"type": "result", "current": 1, "total": 1, "result": result}
             return
 
@@ -322,6 +329,7 @@ class AnalysisEngine:
         learnable_results: list[dict] = []
         for fi in file_infos:
             if self._cancelled:
+                self._flush_cache()
                 yield {"type": "cancelled", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total}
                 return
             if force:
@@ -345,6 +353,7 @@ class AnalysisEngine:
         needs_ai: list[FileInfo] = []
         for fi in needs_rules:
             if self._cancelled:
+                self._flush_cache()
                 yield {"type": "cancelled", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total}
                 return
             match = self.rules.evaluate(fi)
@@ -360,12 +369,14 @@ class AnalysisEngine:
         # 第三遍：AI/本地分析，逐文件 yield
         for fi in needs_ai:
             if self._cancelled:
+                self._flush_cache()
                 yield {"type": "cancelled", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total}
                 return
             ai_result = self._analyze_single(fi)
             learnable_results.append(ai_result)
             yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": ai_result}
 
+        self._flush_cache()
         self._learn_from_results(learnable_results)
 
     def relocate_analysis(self, path: str) -> list[dict]:
@@ -520,12 +531,26 @@ class AnalysisEngine:
         source: str,
         risk: str = "none",
     ) -> None:
+        self._cache_buffer.append({
+            "file_path": fi.path,
+            "mtime": int(fi.mtime),
+            "size_bytes": fi.size,
+            "decision": decision,
+            "confidence": confidence,
+            "reason": reason,
+            "risk": risk,
+            "ai_model": f"{self.ai_model}({source})",
+        })
+        if len(self._cache_buffer) >= 50:
+            self._flush_cache()
+
+    def _flush_cache(self) -> None:
+        if not self._cache_buffer:
+            return
+        entries = self._cache_buffer
+        self._cache_buffer = []
         try:
-            self.cache.upsert(
-                file_path=fi.path, mtime=int(fi.mtime), size_bytes=fi.size,
-                decision=decision, confidence=confidence, reason=reason,
-                risk=risk, ai_model=f"{self.ai_model}({source})",
-            )
+            self.cache.upsert_many(entries)
         except Exception:
             pass
 

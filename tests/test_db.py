@@ -84,6 +84,24 @@ class TestAnalysisCache:
         assert result["decision"] == "keep"
         assert result["ai_model"] == "claude"
 
+    def test_批量写入缓存(self, db):
+        cache = AnalysisCache(db)
+        cache.upsert_many([
+            {
+                "file_path": f"/tmp/batch_{i}.tmp",
+                "mtime": 1700000000,
+                "size_bytes": 1000,
+                "decision": "safe_to_delete",
+                "confidence": 0.95,
+                "reason": "批量",
+                "risk": "none",
+                "ai_model": "test",
+            }
+            for i in range(3)
+        ])
+        keys = [(f"/tmp/batch_{i}.tmp", 1700000000, 1000) for i in range(3)]
+        assert len(cache.batch_get(keys)) == 3
+
     def test_批量查询缓存命中率(self, db):
         cache = AnalysisCache(db)
         # 写入 10 条缓存

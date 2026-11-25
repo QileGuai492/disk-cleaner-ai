@@ -107,6 +107,34 @@ class TestCheckDeps:
         assert "不给出逐个文件的安全结论" in result.output
 
 
+class TestRelocate:
+    """搬迁命令（不实际创建 Junction）。"""
+
+    def test_搬迁命令调用执行器(self, runner, tmp_path, monkeypatch):
+        from disk_cleaner.cleaner.junction import JunctionManager, JunctionResult
+
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "data.txt").write_text("data", encoding="utf-8")
+        target = tmp_path / "relocated"
+        called = {}
+
+        def fake_relocate(src, dst, auto_junction=True):
+            called["src"] = src
+            called["dst"] = dst
+            called["junction"] = auto_junction
+            return JunctionResult(
+                source=src, target=str(target / "source"),
+                action="created", success=True,
+            )
+
+        monkeypatch.setattr(JunctionManager, "relocate_directory", staticmethod(fake_relocate))
+        result = runner.invoke(cli, ["relocate", str(source), str(target), "-y"])
+        assert result.exit_code == 0
+        assert "搬迁成功" in result.output
+        assert called["junction"] is True
+
+
 class TestStatsRecording:
     """扫描后 stats 应该有真实数字。"""
 

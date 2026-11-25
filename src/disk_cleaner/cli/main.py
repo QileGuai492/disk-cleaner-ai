@@ -13,7 +13,7 @@ try:
     from importlib.metadata import version as _pkg_version
     _VERSION = _pkg_version("disk-cleaner")
 except Exception:
-    _VERSION = "0.5.0"
+    _VERSION = "0.6.0"
 
 from disk_cleaner.scanner.walker import FileInfo, scan_directory
 from disk_cleaner.analyzer.engine import AnalysisEngine
@@ -264,6 +264,59 @@ def migrate(path: str, target: str, top: int):
                 click.echo(f"  [{icon}] {r['name']:<45} {r['size_mb']:>8.1f} MB")
     finally:
         db.close()
+
+
+@cli.command()
+@click.argument("source", type=StrippedPath(exists=True))
+@click.argument("target", type=StrippedPath())
+@click.option("--junction/--no-junction", default=True, help="是否在原位置创建 Junction")
+@click.option("--yes", "-y", is_flag=True, default=False, help="跳过确认")
+def relocate(source: str, target: str, junction: bool, yes: bool):
+    """搬迁目录到目标盘，并在原位置创建 Junction（失败自动回滚）"""
+    from disk_cleaner.cleaner.junction import JunctionManager
+
+    if not os.path.isdir(source):
+        click.echo("源路径必须是目录。", err=True)
+        return
+    source_abs = os.path.abspath(source)
+    target_abs = os.path.abspath(target)
+    system_root = os.path.abspath(os.environ.get("SystemRoot", r"C:\Windows")).lower()
+    if (
+        source_abs.lower() == system_root
+        or source_abs.lower().startswith(system_root + os.sep)
+        or os.path.dirname(source_abs) == os.path.abspath(source_abs)
+    ):
+        click.echo("拒绝搬迁 Windows 系统目录或盘符根目录。", err=True)
+        return
+    try:
+        if os.path.commonpath([source_abs, target_abs]) == source_abs:
+            click.echo("目标路径不能位于源目录内部。", err=True)
+            return
+    except ValueError:
+        pass
+
+    click.echo(f"源目录: {source_abs}")
+    click.echo(f"目标基础: {target_abs}")
+    click.echo(f"创建 Junction: {'是' if junction else '否'}")
+    if not yes and not click.confirm("确认搬迁？移动大目录可能需要较长时间"):
+        click.echo("已取消。")
+        return
+
+    result = JunctionManager.relocate_directory(
+        source_abs, target_abs, auto_junction=junction
+    )
+    try:
+        from disk_cleaner.logging_utils import audit
+        audit("relocate", source=source_abs, target=target_abs,
+              junction=junction, success=result.success, error=result.error)
+    except Exception:
+        pass
+    if result.success:
+        click.echo(f"搬迁成功: {source_abs} -> {result.target}")
+        if junction:
+            click.echo(f"已创建 Junction: {source_abs} -> {result.target}")
+    else:
+        click.echo(f"搬迁失败: {result.error}", err=True)
 
 
 @cli.command()
