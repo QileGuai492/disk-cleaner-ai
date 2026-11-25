@@ -53,8 +53,14 @@ def _post(url, payload, token=None, content_type="application/json", origin=None
 def test_page_contains_session_token(gui_server):
     with urllib.request.urlopen(gui_server + "/", timeout=5) as response:
         body = response.read().decode("utf-8")
-    assert "test-token" in body
-    assert "__DC_TOKEN__" not in body
+    assert "/static/app.js" in body
+    assert "chatPanel" in body
+    assert "清理顾问" in body
+
+    with urllib.request.urlopen(gui_server + "/static/app.js", timeout=5) as response:
+        script = response.read().decode("utf-8")
+    assert "test-token" in script
+    assert "__DC_TOKEN__" not in script
 
 
 def test_clean_without_token_is_rejected(gui_server):

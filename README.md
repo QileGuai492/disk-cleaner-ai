@@ -13,6 +13,7 @@ pip install -e ".[dev]"
 | `scan` | 扫描目录找大文件 | `disk-cleaner scan C:\Users --top 50` |
 | `analyze` | AI 分析可清理性 | `disk-cleaner analyze C:\Users -p deepseek` |
 | `migrate` | 分析哪些能搬到 D 盘 | `disk-cleaner migrate C:\ -t D:\Relocated` |
+| `relocate` | 搬迁目录并创建 Junction | `disk-cleaner relocate "C:\Program Files\App" D:\Relocated` |
 | `check-deps` | 检查 DLL 是否被引用 | `disk-cleaner check-deps C:\Program Files` |
 | `clean` | 执行清理 | `disk-cleaner clean file1.tmp file2.log -m backup` |
 | `backup` | 管理备份区 | `disk-cleaner backup list` |
@@ -88,6 +89,18 @@ disk-cleaner migrate C:\ -t E:\Relocated      # 指定目标盘
 有风险:     3 个               ← 搬走+创建 Junction
 不可搬迁:   12 个              ← 硬绑 C 盘
 ```
+
+### 3.1 `relocate` — 搬迁目录并创建 Junction
+
+```bash
+# 确认后搬迁整个目录，并在原位置创建 Junction
+disk-cleaner relocate "C:\Program Files\WeChat" D:\Relocated
+
+# 只移动，不创建链接
+disk-cleaner relocate "D:\Games\OldGame" E:\Games --no-junction -y
+```
+
+搬迁采用“移动 → 创建链接 → 失败自动回滚”的顺序；如果 `mklink` 失败，目录会移回原位置。Windows 系统目录和盘符根目录会被拒绝。
 
 ### 4. `check-deps` — 依赖检查
 
@@ -204,7 +217,9 @@ disk-cleaner gui --no-browser       # 不自动打开浏览器
 - SSE 实时进度条、结果逐条呈现
 - 筛选栏：大小、判定、文件名正则、理由正则
 - 点击文件名在资源管理器中定位
-- 全选/批量清理、导出报告
+- 清理顾问：单文件/文件夹/整次扫描问答，给证据和清理计划草案（不直接执行）
+- 恢复备份：按批次恢复已清理文件
+- 全选/批量清理、导出报告；`keep/critical` 行不可勾选
 - 7 套主题切换（右上角下拉）
 
 > GUI 只监听 `127.0.0.1`，并在启动时生成一次性会话 Token。请勿把端口转发到局域网或公网。
@@ -284,7 +299,8 @@ disk-cleaner migrate C:\ -t D:\Relocated
 # 2. 检查依赖（确保搬迁不会破坏其他程序）
 disk-cleaner check-deps <要搬迁的目录>
 
-# 3. 确认后手动搬迁（当前版本自动搬迁待实现）
+# 3. 确认后搬迁目录并创建 Junction
+disk-cleaner relocate <要搬迁的目录> D:\Relocated
 ```
 
 ## 配置文件

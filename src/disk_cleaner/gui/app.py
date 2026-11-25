@@ -14,7 +14,8 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from disk_cleaner.analyzer.engine import AnalysisEngine
-from disk_cleaner.cleaner.executor import CleanExecutor
+from disk_cleaner.chat_service import ChatService
+from disk_cleaner.cleaner.executor import BackupManager, CleanExecutor
 from disk_cleaner.db.models import Database
 
 
@@ -69,6 +70,7 @@ class GUIHandler(BaseHTTPRequestHandler):
     token: str = ""
     port: int = 8765
     scanned_paths: set[str] = set()
+    chat_service: ChatService | None = None
 
     # ---- 安全校验 -------------------------------------------------
     def _check_host(self) -> bool:
@@ -107,6 +109,11 @@ class GUIHandler(BaseHTTPRequestHandler):
 
     def _forbid(self, message: str = "forbidden"):
         self._respond_json({"error": message}, status=403)
+
+    def _chat(self) -> ChatService:
+        if GUIHandler.chat_service is None:
+            GUIHandler.chat_service = ChatService()
+        return GUIHandler.chat_service
 
     def _discard_body(self) -> None:
         """拒绝请求时丢弃已发送的请求体，避免连接被客户端重置。"""
@@ -147,6 +154,18 @@ class GUIHandler(BaseHTTPRequestHandler):
             if "force" in data:
                 data["force"] = data["force"].lower() == "true"
             self._handle_analyze_stream(data)
+        elif self.path.startswith("/api/chat/stream"):
+            if not self._authorized():
+                self._forbid("未授权：请刷新页面后重试")
+                return
+            qs = parse_qs(urlparse(self.path).query)
+            data = {k: v[0] for k, v in qs.items()}
+            self._handle_chat_stream(data)
+        elif self.path.split("?")[0] in ("/static/app.css", "/static/app.js"):
+            if not self._check_host():
+                self._forbid("仅允许本机访问")
+                return
+            self._respond_static(self.path.split("?")[0])
         else:
             self.send_response(404)
             self.end_headers()
@@ -199,6 +218,18 @@ class GUIHandler(BaseHTTPRequestHandler):
             self._handle_cancel()
         elif self.path == "/api/report":
             self._handle_report()
+        elif self.path == "/api/chat/session":
+            self._handle_chat_session(data)
+        elif self.path == "/api/chat/message":
+            self._handle_chat_message(data)
+        elif self.path == "/api/chat/plan":
+            self._handle_chat_plan(data)
+        elif self.path == "/api/open-folder":
+            self._handle_open_folder(data)
+        elif self.path == "/api/backups":
+            self._handle_backups()
+        elif self.path == "/api/backup/restore":
+            self._handle_restore_backup(data)
         else:
             self.send_response(404)
             self.end_headers()
@@ -295,8 +326,9 @@ class GUIHandler(BaseHTTPRequestHandler):
             self._respond_json({"error": f"路径不存在: {path}"}, status=400)
             return
 
-        # 每次新扫描重置本次可清理白名单
+        # 每次新扫描重置本次可清理白名单与聊天上下文来源
         GUIHandler.scanned_paths = set()
+        GUIHandler.last_results = []
 
         # SSE 响应头
         self.send_response(200)
@@ -415,18 +447,149 @@ class GUIHandler(BaseHTTPRequestHandler):
             "warning": "；".join(plan.warnings),
         })
 
+    # ---- 清理顾问 ---------------------------------------------------
+    def _handle_chat_session(self, data: dict):
+        results = GUIHandler.last_results or []
+        if not results:
+            self._respond_json({"error": "请先分析目录，再打开清理顾问"}, status=400)
+            return
+        scope = data.get("scope", "scan")
+        target = data.get("target", "")
+        context = self._chat().create_session(results, scope=scope, target=target)
+        self._respond_json({"session": context.summary_for_ui()})
+
+    def _handle_chat_message(self, data: dict):
+        session_id = data.get("session_id", "")
+        text = data.get("text", "")
+        provider = data.get("provider", "")
+        answer = self._chat().answer(session_id, text, provider=provider)
+        if "error" in answer:
+            self._respond_json(answer, status=400)
+            return
+        self._respond_json(answer)
+
+    def _handle_chat_stream(self, data: dict):
+        session_id = data.get("session_id", "")
+        text = data.get("text", "")
+        provider = data.get("provider", "")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        context = self._chat().get(session_id)
+        if context is None:
+            self._sse_send({"type": "error", "message": "会话不存在或已过期，请重新打开清理顾问"})
+            return
+        self._sse_send({"type": "meta", "session": context.summary_for_ui()})
+        answer = self._chat().answer(session_id, text, provider=provider)
+        if "error" in answer:
+            self._sse_send({"type": "error", "message": answer["error"]})
+            return
+
+        body = answer.get("answer", "")
+        step = 80
+        for index in range(0, len(body), step):
+            self._sse_send({"type": "token", "text": body[index:index + step]})
+        self._sse_send({"type": "answer", **answer})
+        self._sse_send({"type": "done"})
+
+    def _handle_chat_plan(self, data: dict):
+        session_id = data.get("session_id", "")
+        mode = data.get("mode", "backup")
+        paths = data.get("paths")
+        if paths is not None and not isinstance(paths, list):
+            self._respond_json({"error": "paths 必须是数组"}, status=400)
+            return
+        result = self._chat().draft_plan(session_id, mode=mode, paths=paths or None)
+        if "error" in result:
+            self._respond_json(result, status=400)
+            return
+        self._respond_json(result)
+
+    def _handle_open_folder(self, data: dict):
+        path = data.get("path", "")
+        if not path or not os.path.exists(path):
+            self._respond_json({"error": "路径不存在"}, status=404)
+            return
+        folder = os.path.abspath(path if os.path.isdir(path) else os.path.dirname(path))
+        allowed = False
+        for scanned in GUIHandler.scanned_paths:
+            try:
+                if os.path.commonpath([folder, os.path.abspath(scanned)]) == folder:
+                    allowed = True
+                    break
+            except ValueError:
+                continue
+        if not allowed:
+            self._respond_json({"error": "只能打开本次扫描范围内的目录"}, status=403)
+            return
+        try:
+            subprocess.run(
+                ["explorer", folder],
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            )
+            self._respond_json({"status": "ok"})
+        except Exception as e:
+            self._respond_json({"error": str(e)}, status=500)
+
+    def _handle_backups(self):
+        manager = BackupManager()
+        batches = []
+        for batch in manager.list_batches():
+            batches.append({
+                "batch_id": batch.get("batch_id", ""),
+                "label": batch.get("label", ""),
+                "created_at": batch.get("created_at", ""),
+                "file_count": len(batch.get("files", [])),
+                "total_bytes": sum(int(f.get("size") or 0) for f in batch.get("files", [])),
+            })
+        self._respond_json({"batches": batches})
+
+    def _handle_restore_backup(self, data: dict):
+        batch_id = str(data.get("batch_id", ""))
+        manager = BackupManager()
+        valid = {b.get("batch_id") for b in manager.list_batches()}
+        if not batch_id or batch_id not in valid:
+            self._respond_json({"error": "备份批次不存在"}, status=404)
+            return
+        results = manager.restore_batch(batch_id)
+        success = [r for r in results if r.success]
+        failed = [r for r in results if not r.success]
+        self._respond_json({
+            "restored": len(success),
+            "failed": len(failed),
+            "errors": [r.error for r in failed if r.error][:10],
+        })
+
     def _handle_report(self):
-        safe = [r for r in GUIHandler.last_results if r["decision"] in ("safe_to_delete", "likely_safe")]
+        results = GUIHandler.last_results
+        safe = [r for r in results if r["decision"] in ("safe_to_delete", "likely_safe")]
+        keep = [r for r in results if r["decision"] in ("keep", "critical")]
+        review = [r for r in results if r["decision"] == "needs_review"]
         reclaim = sum(r["size"] for r in safe)
         reclaim_str = f"{reclaim / (1024**3):.2f} GB" if reclaim > 1e9 else f"{reclaim / (1024**2):.1f} MB"
         rows = "".join(
             f"<tr><td>{html_module.escape(str(r['name']))}</td>"
             f"<td>{r['size_mb']:.1f} MB</td>"
             f"<td>{html_module.escape(str(r['decision']))}</td>"
+            f"<td>{html_module.escape(str(r.get('source', '')))}</td>"
             f"<td>{html_module.escape(str(r.get('reason', '')))}</td></tr>"
-            for r in safe[:50]
+            for r in sorted(results, key=lambda r: int(r.get("size") or 0), reverse=True)[:100]
         )
-        html = f"<html><head><meta charset=utf-8><title>清理报告</title></head><body><h1>清理报告</h1><p>可释放: {reclaim_str}</p><table border=1>{rows}</table></body></html>"
+        html = (
+            "<html><head><meta charset=utf-8><title>清理报告</title>"
+            "<style>body{font-family:system-ui;max-width:1100px;margin:20px auto;padding:0 20px}"
+            "table{border-collapse:collapse;width:100%}th,td{border:1px solid #ddd;padding:6px;text-align:left}"
+            "th{background:#f0f0f0}</style></head><body>"
+            "<h1>磁盘清理报告</h1>"
+            f"<p>总文件: {len(results)} · 可清理: {len(safe)} · 需确认: {len(review)} · "
+            f"建议保留: {len(keep)} · 预计可释放: {reclaim_str}</p>"
+            "<table><tr><th>文件</th><th>大小</th><th>判定</th><th>来源</th><th>理由</th></tr>"
+            f"{rows}</table></body></html>"
+        )
         self._respond_json({"html": html})
 
     def _respond_json(self, data: dict, status: int = 200):
@@ -437,6 +600,24 @@ class GUIHandler(BaseHTTPRequestHandler):
             self.close_connection = True
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode())
+
+    def _respond_static(self, url_path: str):
+        name = os.path.basename(url_path)
+        file_path = Path(__file__).resolve().parent / "static" / name
+        try:
+            content = file_path.read_text(encoding="utf-8")
+        except OSError:
+            self.send_response(404)
+            self.end_headers()
+            return
+        if name.endswith(".js"):
+            content = content.replace("__DC_TOKEN__", GUIHandler.token)
+        content_type = "text/css; charset=utf-8" if name.endswith(".css") else "application/javascript; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.end_headers()
+        self.wfile.write(content.encode("utf-8"))
 
     def _respond_html(self, html: str):
         self.send_response(200)
@@ -474,6 +655,8 @@ def start_gui(port: int | None = None, open_browser: bool | None = None):
     GUIHandler.token = secrets.token_urlsafe(32)
     GUIHandler.port = port
     GUIHandler.scanned_paths = set()
+    GUIHandler.last_results = []
+    GUIHandler.chat_service = ChatService()
 
     server = ThreadingHTTPServer(("127.0.0.1", port), GUIHandler)
     server.daemon_threads = True
