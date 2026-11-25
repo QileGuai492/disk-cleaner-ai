@@ -13,7 +13,7 @@ try:
     from importlib.metadata import version as _pkg_version
     _VERSION = _pkg_version("disk-cleaner")
 except Exception:
-    _VERSION = "0.6.0"
+    _VERSION = "0.6.1"
 
 from disk_cleaner.scanner.walker import FileInfo, scan_directory
 from disk_cleaner.analyzer.engine import AnalysisEngine
