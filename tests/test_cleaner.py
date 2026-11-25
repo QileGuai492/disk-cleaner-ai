@@ -14,11 +14,11 @@ def temp_dir():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         # 创建测试文件
-        (root / "file_to_clean.tmp").write_text("garbage" * 100)
-        (root / "keep_me.txt").write_text("important data")
+        (root / "file_to_clean.tmp").write_text("garbage" * 100, encoding="utf-8")
+        (root / "keep_me.txt").write_text("important data", encoding="utf-8")
         sub = root / "subdir"
         sub.mkdir()
-        (sub / "nested_file.log").write_text("log data")
+        (sub / "nested_file.log").write_text("log data", encoding="utf-8")
         yield root
 
 

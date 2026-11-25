@@ -40,8 +40,8 @@ def temp_project():
         (root / "orphan.dll").write_bytes(b"MZ" + b"\x00" * 100 + b"PE\x00\x00" + b"\x00" * 200 + b"kernel32.dll\x00")
 
         # 非 PE 文件
-        (root / "readme.txt").write_text("Hello World")
-        (root / "config.json").write_text('{"key": "value"}')
+        (root / "readme.txt").write_text("Hello World", encoding="utf-8")
+        (root / "config.json").write_text('{"key": "value"}', encoding="utf-8")
         yield root
 
 

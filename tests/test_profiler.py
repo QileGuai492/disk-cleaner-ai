@@ -16,7 +16,7 @@ class TestFileType:
 
     def test_识别日志文件(self, tmp_path):
         f = tmp_path / "app.log"
-        f.write_text("2024-01-01 INFO started\n" * 50)
+        f.write_text("2024-01-01 INFO started\n" * 50, encoding="utf-8")
         assert ContentProfiler.identify_type(str(f)) == FileType.TEXT_LOG
 
     def test_识别JSON配置(self, tmp_path):
@@ -26,12 +26,12 @@ class TestFileType:
 
     def test_识别YAML配置(self, tmp_path):
         f = tmp_path / "settings.yaml"
-        f.write_text("server:\n  host: localhost\n  port: 8080\n")
+        f.write_text("server:\n  host: localhost\n  port: 8080\n", encoding="utf-8")
         assert ContentProfiler.identify_type(str(f)) == FileType.CONFIG
 
     def test_识别INI配置(self, tmp_path):
         f = tmp_path / "app.ini"
-        f.write_text("[database]\nhost=localhost\nport=5432\n")
+        f.write_text("[database]\nhost=localhost\nport=5432\n", encoding="utf-8")
         assert ContentProfiler.identify_type(str(f)) == FileType.CONFIG
 
     def test_识别SQLite数据库(self, tmp_path):
@@ -57,7 +57,7 @@ class TestFileType:
 
     def test_空文件默认识别(self, tmp_path):
         f = tmp_path / "empty"
-        f.write_text("")
+        f.write_text("", encoding="utf-8")
         assert ContentProfiler.identify_type(str(f)) == FileType.UNKNOWN
 
     def test_扩展名优先级高于magic_bytes(self, tmp_path):
@@ -111,7 +111,7 @@ class TestContentProfiler:
         lines = []
         for i in range(100):
             lines.append(f"2024-06-{i%28+1:02d} ERROR Connection timeout to db-host-{i}:5432\n")
-        f.write_text("".join(lines))
+        f.write_text("".join(lines), encoding="utf-8")
 
         summary = profiler.profile(str(f))
         assert summary.file_type == "text_log"
@@ -193,7 +193,7 @@ class TestContentProfiler:
 
     def test_摘要长度限制(self, profiler, tmp_path):
         f = tmp_path / "config.xml"
-        f.write_text("<root>\n  " + "\n  ".join(f"<item{i}>value{i}</item{i}>" for i in range(200)) + "\n</root>")
+        f.write_text("<root>\n  " + "\n  ".join(f"<item{i}>value{i}</item{i}>" for i in range(200)) + "\n</root>", encoding="utf-8")
         summary = profiler.profile(str(f))
         # 摘要文本不应超过 500 字符
         assert len(summary.summary_text) <= 500
@@ -202,7 +202,7 @@ class TestContentProfiler:
         files = []
         for i in range(10):
             f = tmp_path / f"file_{i}.log"
-            f.write_text("".join(f"log entry {j}\n" for j in range(20)))
+            f.write_text("".join(f"log entry {j}\n" for j in range(20)), encoding="utf-8")
             files.append(str(f))
 
         summaries = profiler.profile_batch(files)

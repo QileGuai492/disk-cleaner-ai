@@ -53,7 +53,7 @@ class TestFingerprintDB:
             (root / "myproject" / "script.pyc").write_bytes(b"\x00" * 200)
 
             # 非匹配文件
-            (root / "important.docx").write_text("重要文档")
+            (root / "important.docx").write_text("重要文档", encoding="utf-8")
             yield root
 
     def test_内置指纹已加载(self, db):

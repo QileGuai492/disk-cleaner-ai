@@ -113,9 +113,9 @@ class TestFileMonitor:
         time.sleep(0.5)
 
         f = temp_dir / "modified.log"
-        f.write_text("first write\n")
+        f.write_text("first write\n", encoding="utf-8")
         time.sleep(0.5)
-        f.write_text("second write\n")
+        f.write_text("second write\n", encoding="utf-8")
 
         time.sleep(1.5)
         events = monitor.get_events()

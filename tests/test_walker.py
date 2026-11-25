@@ -57,8 +57,8 @@ class TestScanDirectory:
             root = Path(td)
 
             # 创建一些文件
-            (root / "file1.txt").write_text("hello" * 1000)   # ~5KB
-            (root / "file2.log").write_text("error" * 500)     # ~2.5KB
+            (root / "file1.txt").write_text("hello" * 1000, encoding="utf-8")   # ~5KB
+            (root / "file2.log").write_text("error" * 500, encoding="utf-8")     # ~2.5KB
 
             # 创建子目录
             sub = root / "subdir"
@@ -66,7 +66,7 @@ class TestScanDirectory:
             (sub / "large_file.dat").write_bytes(b"\x00" * 10_000)  # ~10KB
 
             # 创建空文件
-            (root / "empty.txt").write_text("")
+            (root / "empty.txt").write_text("", encoding="utf-8")
 
             yield root
 
@@ -164,6 +164,6 @@ class TestScanDirectoryErrors:
 
     def test_文件在扫描期间被删除(self, temp_dir):
         # 正常情况下文件不会被删，这里确保不崩溃
-        (temp_dir / "will_exist.txt").write_text("data")
+        (temp_dir / "will_exist.txt").write_text("data", encoding="utf-8")
         results = scan_directory(str(temp_dir))
         assert len(results) >= 1

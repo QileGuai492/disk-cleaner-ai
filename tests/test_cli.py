@@ -18,9 +18,9 @@ def temp_project():
     """创建临时测试项目"""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        (root / "README.md").write_text("# Test")
-        (root / "main.py").write_text("print('hello')\n" * 100)
-        (root / "test.log").write_text("error\n" * 50)
+        (root / "README.md").write_text("# Test", encoding="utf-8")
+        (root / "main.py").write_text("print('hello')\n" * 100, encoding="utf-8")
+        (root / "test.log").write_text("error\n" * 50, encoding="utf-8")
         (root / "debug.tmp").write_bytes(b"\x00" * 5000)
         sub = root / "build"
         sub.mkdir()
@@ -101,7 +101,7 @@ class TestCheckDeps:
         assert "可以安全处理" not in result.output
 
     def test_目录模式只给统计并提示局限(self, runner, tmp_path):
-        (tmp_path / "readme.txt").write_text("hello")
+        (tmp_path / "readme.txt").write_text("hello", encoding="utf-8")
         result = runner.invoke(cli, ["check-deps", str(tmp_path)])
         assert result.exit_code == 0
         assert "不给出逐个文件的安全结论" in result.output

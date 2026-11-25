@@ -34,9 +34,9 @@ def temp_dir():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         (root / "setup.exe").write_bytes(b"MZ" + b"\x00" * 10000)
-        (root / "debug.log").write_text("INFO: started\n" * 100)
+        (root / "debug.log").write_text("INFO: started\n" * 100, encoding="utf-8")
         (root / "dump.tmp").write_bytes(b"\x00" * 500)
-        (root / "config.json").write_text('{"host":"localhost","port":8080}')
+        (root / "config.json").write_text('{"host":"localhost","port":8080}', encoding="utf-8")
         sub = root / "subdir"
         sub.mkdir()
         (sub / "data.db").write_bytes(b"SQLite format 3\x00" + b"\x00" * 5000)
