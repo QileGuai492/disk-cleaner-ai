@@ -50,7 +50,11 @@ def _model_for(provider: str) -> str:
 
 def _load_gui_html() -> str:
     """从 static/index.html 加载页面，避免 HTML/JS/CSS 与 Python 混在一起。"""
-    return (Path(__file__).resolve().parent / "static" / "index.html").read_text(encoding="utf-8")
+    path = Path(__file__).resolve().parent / "static" / "index.html"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"<h1>GUI 静态资源缺失</h1><p>{html_module.escape(str(exc))}</p>"
 
 
 GUI_HTML = _load_gui_html()
