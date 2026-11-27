@@ -2,6 +2,7 @@ const DC_TOKEN = "__DC_TOKEN__";
 let _busy = false, _ctrl = null;
 let _allResults = [];
 let _chatSession = null, _chatTarget = '', _chatScope = 'scan', _chatKey = '', _chatES = null;
+let _lastPlanPaths = [];
 const $=id=>document.getElementById(id);
 
 async function api(path, data) {
@@ -108,6 +109,7 @@ async function handleScan() {
   let _es = null;  // EventSource 引用，供取消用
   let _results = [];
   _allResults = [];
+  renderSummary({}, {});
   resetChatState();
   try {
     const p=cleanPath($('path').value), t=parseInt($('top').value), r=$('recursive').checked,
@@ -118,9 +120,9 @@ async function handleScan() {
 
     // 初始化空表格
     $('resultsBody').innerHTML =
-      `<div style="margin:8px 0;display:flex;justify-content:space-between;align-items:center">
-         <span>
-           <select id="filterSize" onchange="applyFilters()" style="width:auto;margin-right:6px">
+      `<div class="result-bar">
+         <span class="result-filters">
+           <select id="filterSize" onchange="applyFilters()" style="width:auto">
              <option value="0">全部大小</option>
              <option value="-1">< 1 MB</option>
              <option value="1">>1 MB</option>
@@ -128,30 +130,29 @@ async function handleScan() {
              <option value="100">>100 MB</option>
              <option value="1024">>1 GB</option>
            </select>
-           <select id="filterDecision" onchange="applyFilters()" style="width:auto;margin-right:6px">
+           <select id="filterDecision" onchange="applyFilters()" style="width:auto">
              <option value="all">全部判定</option>
              <option value="safe_to_delete">可删除</option>
              <option value="likely_safe">概率可删</option>
              <option value="needs_review">需确认</option>
              <option value="keep">保留</option>
            </select>
-           <span style="position:relative;display:inline-block;margin-right:6px">
+           <span style="position:relative;display:inline-block">
              <input id="filterFile" placeholder="文件名" oninput="$('clearFile').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
              <button id="clearFile" onclick="$('filterFile').value='';$('clearFile').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
            </span>
-           <span style="position:relative;display:inline-block;margin-right:6px">
+           <span style="position:relative;display:inline-block">
              <input id="filterReason" placeholder="理由" oninput="$('clearReason').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
              <button id="clearReason" onclick="$('filterReason').value='';$('clearReason').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
            </span>
-           <button onclick="applyFilters()" style="margin-left:4px">筛选</button>
+           <button onclick="applyFilters()">筛选</button>
+           <button class="result-clean" onclick="cleanSelected()">清理选中</button>
          </span>
-         <span>
-           <button onclick="cleanSelected()">清理选中</button>
-           <button onclick="getReport()" style="margin-left:6px">导出报告</button>
-            <button onclick="showBackups()" style="margin-left:6px">恢复备份</button>
-            <button onclick="openChat('folder', cleanPath($('path').value))" style="margin-left:6px">评估目录</button>
-            <button onclick="openChat('scan','')" style="margin-left:6px">清理顾问</button>
-            <button onclick="showDirView()" style="margin-left:6px">目录视图</button>
+         <span class="result-actions">
+           <button onclick="getReport()">导出报告</button>
+            <button onclick="showBackups()">恢复备份</button>
+            <button onclick="openChat('folder', cleanPath($('path').value), true)">整体评估</button>
+            <button onclick="openChat('scan','')">智能建议</button>
          </span>
        </div>
        <div style="overflow-x:auto"><table id="resultsTable">
@@ -172,6 +173,7 @@ async function handleScan() {
         appendResult(d.result);
         _results.push(d.result);
         _allResults.push(d.result);
+        updateSummaryLive(_allResults, d.stats);
       } else if (d.type === 'done') {
         _es.close(); _es = null;
         $('progressBar').style.width = '100%';
@@ -219,7 +221,7 @@ function appendResult(r) {
   const showDir = $('recursive').checked;
   const row = `<tr data-size-mb="${r.size_mb||0}" data-decision="${r.decision||''}" data-reason="${escAttr(r.reason||'')}" data-name="${escAttr(r.name||'')}">
     <td><input type="checkbox" value="${escAttr(r.path)}" ${(r.decision==='keep'||r.decision==='critical')?'disabled':''}></td>
-    <td><div class="cell-scroll"><a href="#" class="filelink" data-path="${escAttr(r.path)}" title="在资源管理器中打开并选中">${escHtml(showDir?r.path.replace(/\\/g,'/').replace(cleanPath($('path').value).replace(/\\/g,'/').replace(/\/$/,'')+'/',''):r.name)}</a> <button class="ask-btn" data-path="${escAttr(r.path)}" title="问清理顾问">问</button></div></td>
+    <td><div class="cell-scroll"><a href="#" class="filelink" data-path="${escAttr(r.path)}" title="在资源管理器中打开并选中">${escHtml(showDir?r.path.replace(/\\/g,'/').replace(cleanPath($('path').value).replace(/\\/g,'/').replace(/\/$/,'')+'/',''):r.name)}</a> <button class="ask-btn" data-path="${escAttr(r.path)}" title="问智能建议">问</button></div></td>
     <td>${fmtSize(r.size)}</td>
     <td class="${DECO[r.decision]||''}">${LBL[r.decision]||r.decision}</td>
     <td>${SRC[r.source]||r.source||''}</td>
@@ -229,7 +231,7 @@ function appendResult(r) {
   if (tbody) tbody.insertAdjacentHTML('beforeend', row);
 }
 
-function finishResults(stats, summary) {
+function renderSummary(summary, stats) {
   $('summary').innerHTML =
     `<div class="stat"><div class="num safe">${summary.safe||0}</div><div class="label">可清理</div></div>
      <div class="stat"><div class="num likely">${summary.likely||0}</div><div class="label">可能可清理</div></div>
@@ -237,6 +239,25 @@ function finishResults(stats, summary) {
      <div class="stat"><div class="num keep">${summary.keep||0}</div><div class="label">建议保留</div></div>
      <div class="stat"><div class="num">${stats.cache_hits||0}</div><div class="label">缓存命中</div></div>
      <div class="stat"><div class="num">${stats.ai_calls||0}</div><div class="label">AI 调用</div></div>`;
+}
+
+function updateSummaryLive(results, stats) {
+  const summary = {safe: 0, likely: 0, review: 0, keep: 0};
+  results.forEach(r => {
+    if (r.decision === 'safe_to_delete') summary.safe += 1;
+    else if (r.decision === 'likely_safe') summary.likely += 1;
+    else if (r.decision === 'needs_review') summary.review += 1;
+    else if (r.decision === 'keep' || r.decision === 'critical') summary.keep += 1;
+  });
+  const liveStats = {
+    cache_hits: stats?.cache_hits ?? results.filter(r => String(r.source||'').includes('cache')).length,
+    ai_calls: stats?.ai_calls ?? results.filter(r => r.source === 'ai' || r.source === 'degraded').length,
+  };
+  renderSummary(summary, liveStats);
+}
+
+function finishResults(stats, summary) {
+  renderSummary(summary, stats);
   // 排序：同目录聚拢
   const tbody = $('resultsTbody');
   if (!tbody) return;
@@ -258,13 +279,7 @@ function finishResults(stats, summary) {
 function showResults(data) {
   const results = data.results || [], stats = data.stats || {}, summary = data.summary || {};
   _allResults = results.slice();
-  $('summary').innerHTML =
-    `<div class="stat"><div class="num safe">${summary.safe||0}</div><div class="label">可清理</div></div>
-     <div class="stat"><div class="num likely">${summary.likely||0}</div><div class="label">可能可清理</div></div>
-     <div class="stat"><div class="num review">${summary.review||0}</div><div class="label">需确认</div></div>
-     <div class="stat"><div class="num keep">${summary.keep||0}</div><div class="label">建议保留</div></div>
-     <div class="stat"><div class="num">${stats.cache_hits||0}</div><div class="label">缓存命中</div></div>
-     <div class="stat"><div class="num">${stats.ai_calls||0}</div><div class="label">AI 调用</div></div>`;
+  renderSummary(summary, stats);
 
   if (!results.length) {
     $('resultsBody').innerHTML = '<div class="empty">未发现可分析的文件</div>';
@@ -275,9 +290,9 @@ function showResults(data) {
 
   const showDir = $('recursive').checked;
   $('resultsBody').innerHTML =
-    `<div style="margin:8px 0;display:flex;justify-content:space-between;align-items:center">
-         <span>
-           <select id="filterSize" onchange="applyFilters()" style="width:auto;margin-right:6px">
+    `<div class="result-bar">
+         <span class="result-filters">
+           <select id="filterSize" onchange="applyFilters()" style="width:auto">
              <option value="0">全部大小</option>
              <option value="-1">< 1 MB</option>
              <option value="1">>1 MB</option>
@@ -285,37 +300,36 @@ function showResults(data) {
              <option value="100">>100 MB</option>
              <option value="1024">>1 GB</option>
            </select>
-           <select id="filterDecision" onchange="applyFilters()" style="width:auto;margin-right:6px">
+           <select id="filterDecision" onchange="applyFilters()" style="width:auto">
              <option value="all">全部判定</option>
              <option value="safe_to_delete">可删除</option>
              <option value="likely_safe">概率可删</option>
              <option value="needs_review">需确认</option>
              <option value="keep">保留</option>
            </select>
-           <span style="position:relative;display:inline-block;margin-right:6px">
+           <span style="position:relative;display:inline-block">
              <input id="filterFile" placeholder="文件名" oninput="$('clearFile').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
              <button id="clearFile" onclick="$('filterFile').value='';$('clearFile').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
            </span>
-           <span style="position:relative;display:inline-block;margin-right:6px">
+           <span style="position:relative;display:inline-block">
              <input id="filterReason" placeholder="理由" oninput="$('clearReason').style.display=this.value?'inline':'none'" style="width:160px;padding-right:20px">
              <button id="clearReason" onclick="$('filterReason').value='';$('clearReason').style.display='none';applyFilters()" title="清空" style="display:none;position:absolute;right:2px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:0 4px;line-height:1">&#xD7;</button>
            </span>
-           <button onclick="applyFilters()" style="margin-left:4px">筛选</button>
+           <button onclick="applyFilters()">筛选</button>
+           <button class="result-clean" onclick="cleanSelected()">清理选中</button>
          </span>
-         <span>
-           <button onclick="cleanSelected()">清理选中</button>
-           <button onclick="getReport()" style="margin-left:6px">导出报告</button>
-            <button onclick="showBackups()" style="margin-left:6px">恢复备份</button>
-            <button onclick="openChat('folder', cleanPath($('path').value))" style="margin-left:6px">评估目录</button>
-            <button onclick="openChat('scan','')" style="margin-left:6px">清理顾问</button>
-            <button onclick="showDirView()" style="margin-left:6px">目录视图</button>
+         <span class="result-actions">
+           <button onclick="getReport()">导出报告</button>
+            <button onclick="showBackups()">恢复备份</button>
+            <button onclick="openChat('folder', cleanPath($('path').value), true)">整体评估</button>
+            <button onclick="openChat('scan','')">智能建议</button>
          </span>
        </div>
      <div style="overflow-x:auto"><table id="resultsTable">
        <thead><tr><th><input type="checkbox" onchange="toggleAll(this)" title="全选/取消全选"></th><th>文件</th><th>大小</th><th>判定</th><th>来源</th><th>理由</th></tr></thead>
        <tbody>${results.map(r=>`<tr data-size-mb="${r.size_mb||0}" data-decision="${r.decision||''}" data-reason="${escAttr(r.reason||'')}" data-name="${escAttr(r.name||'')}">
          <td><input type="checkbox" value="${escAttr(r.path)}" ${(r.decision==='keep'||r.decision==='critical')?'disabled':''}></td>
-         <td><div class="cell-scroll"><a href="#" class="filelink" data-path="${escAttr(r.path)}" title="在资源管理器中打开并选中">${escHtml(showDir?r.path.replace(/\\/g,'/').replace(cleanPath($('path').value).replace(/\\/g,'/').replace(/\/$/,'')+'/',''):r.name)}</a> <button class="ask-btn" data-path="${escAttr(r.path)}" title="问清理顾问">问</button></div></td>
+         <td><div class="cell-scroll"><a href="#" class="filelink" data-path="${escAttr(r.path)}" title="在资源管理器中打开并选中">${escHtml(showDir?r.path.replace(/\\/g,'/').replace(cleanPath($('path').value).replace(/\\/g,'/').replace(/\/$/,'')+'/',''):r.name)}</a> <button class="ask-btn" data-path="${escAttr(r.path)}" title="问智能建议">问</button></div></td>
          <td>${fmtSize(r.size)}</td>
          <td class="${DECO[r.decision]||''}">${LBL[r.decision]||r.decision}</td>
          <td>${SRC[r.source]||r.source||''}</td>
@@ -368,14 +382,14 @@ function toggleAll(cb){
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function escAttr(s){return String(s).replace(/"/g,'&quot;')}
 
-async function cleanSelected() {
+async function cleanSelected(skipConfirm = false) {
   const files = [...document.querySelectorAll('#resultsTable tbody tr')]
     .filter(tr => tr.style.display !== 'none')
     .map(tr => tr.querySelector('input[type=checkbox]'))
     .filter(cb => cb && cb.checked && !cb.disabled)
     .map(cb => cb.value);
   if (!files.length) return alert('请先勾选文件');
-  if (!confirm('确认清理 ' + files.length + ' 个文件？')) return;
+  if (!skipConfirm && !confirm('确认清理 ' + files.length + ' 个文件？')) return;
   const r = await api('/api/clean', {files});
   if (r.error) return alert(r.error);
   let msg = `已移动 ${r.moved || 0} 个文件到备份区`;
@@ -389,19 +403,63 @@ ${r.warning}`;
   alert(msg);
 }
 
+let _backupFiles = [];
+
 async function showBackups(){
   const r = await api('/api/backups', {});
   if(r.error) return alert(r.error);
-  const batches = r.batches || [];
-  if(!batches.length) return alert('暂无备份批次');
-  const lines = batches.map(b =>
-    `${b.batch_id}  ${b.file_count} 个文件  ${fmtSize(b.total_bytes)}  ${b.created_at.slice(0,19)}`);
-  const batchId = prompt('输入要恢复的批次 ID：\n\n' + lines.join('\n'));
-  if(!batchId) return;
-  if(!confirm('确认恢复批次 ' + batchId + '？已存在的目标文件不会被覆盖。')) return;
-  const restored = await api('/api/backup/restore', {batch_id:batchId});
-  if(restored.error) return alert(restored.error);
-  alert(`已恢复 ${restored.restored} 个，失败 ${restored.failed} 个`);
+  _backupFiles = r.files || [];
+  if(!_backupFiles.length) return alert('暂无备份文件');
+  renderBackupList();
+  $('backupModal').style.display = 'flex';
+}
+
+function renderBackupList(){
+  $('backupList').innerHTML = _backupFiles.map((f, index) => {
+    const when = String(f.backed_up_at || '').slice(0, 19).replace('T', ' ');
+    return `<label class="backup-item">
+      <input type="checkbox" class="backup-check" data-index="${index}" onchange="updateBackupSelection()">
+      <div>
+        <div class="backup-name">${escHtml(f.name || '')}</div>
+        <div class="backup-path">${escHtml(f.original_path || '')}</div>
+        <div class="backup-meta">${fmtSize(f.size || 0)} · 备份于 ${escHtml(when || '未知时间')}</div>
+      </div>
+    </label>`;
+  }).join('');
+  $('backupAll').checked = false;
+  updateBackupSelection();
+}
+
+function updateBackupSelection(){
+  const checked = document.querySelectorAll('.backup-check:checked').length;
+  $('backupCount').textContent = checked ? `已选 ${checked} 个` : '未选择';
+  $('backupRestoreBtn').disabled = checked === 0;
+  $('backupAll').checked = checked > 0 && checked === _backupFiles.length;
+}
+
+function toggleAllBackups(checked){
+  document.querySelectorAll('.backup-check').forEach(cb => { cb.checked = checked; });
+  updateBackupSelection();
+}
+
+function closeBackups(){
+  $('backupModal').style.display = 'none';
+}
+
+async function restoreSelectedBackups(){
+  const items = [...document.querySelectorAll('.backup-check:checked')]
+    .map(cb => _backupFiles[Number(cb.dataset.index)])
+    .filter(Boolean)
+    .map(f => ({batch_id: f.batch_id, backup_path: f.backup_path}));
+  if(!items.length) return;
+  if(!confirm(`确认恢复选中的 ${items.length} 个文件到原位置？\n原位置已有同名文件的会跳过，不覆盖。`)) return;
+
+  const r = await api('/api/backup/restore', {items});
+  if(r.error) return alert(r.error);
+  const errors = (r.errors || []).slice(0, 3).join('\n');
+  alert(`已恢复 ${r.restored} 个，失败 ${r.failed} 个` + (errors ? `\n\n${errors}` : ''));
+  closeBackups();
+  await showBackups();
 }
 
 async function getReport() {
@@ -411,42 +469,14 @@ async function getReport() {
   w.document.write(r.html);
   w.document.close();
 }
-// ---------- 目录视图 ----------
-function showDirView(){
-  if(!_allResults.length){ alert('请先分析目录'); return; }
-  const groups = {};
-  _allResults.forEach(r=>{
-    let p = String(r.path || '').replace(/\\/g,'/');
-    const dir = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : p;
-    if(!groups[dir]) groups[dir] = {files:0, size:0, safe:0, keep:0};
-    groups[dir].files += 1;
-    groups[dir].size += Number(r.size || 0);
-    if(r.decision === 'safe_to_delete' || r.decision === 'likely_safe') groups[dir].safe += 1;
-    if(r.decision === 'keep' || r.decision === 'critical') groups[dir].keep += 1;
-  });
-  const rows = Object.entries(groups).sort((a,b)=>b[1].size-a[1].size).map(([dir,v])=>
-    `<tr><td style="word-break:break-all">${escHtml(dir)}</td><td>${v.files}</td>` +
-    `<td>${fmtSize(v.size)}</td><td>${v.safe}</td><td>${v.keep}</td>` +
-    `<td><button class="dir-ask" data-dir="${escAttr(dir)}">评估</button></td></tr>`).join('');
-  $('dirBody').innerHTML =
-    `<table><thead><tr><th>目录</th><th>文件数</th><th>大小</th><th>可清理</th><th>保留</th><th></th></tr></thead>` +
-    `<tbody>${rows}</tbody></table>`;
-  $('dirModal').style.display = 'flex';
-}
-function closeDirView(){ $('dirModal').style.display = 'none'; }
-document.addEventListener('click', e=>{
-  const btn = e.target.closest && e.target.closest('.dir-ask');
-  if(btn){ closeDirView(); openChat('folder', btn.dataset.dir); }
-});
-
-// ---------- 清理顾问 ----------
+// ---------- 智能建议 ----------
 function normPath(p){return String(p||'').replace(/\\/g,'/').replace(/\/$/,'').toLowerCase()}
 function chatScopeLabel(scope){
   return {file:'单文件',folder:'文件夹',selection:'多选',scan:'本次扫描'}[scope]||scope;
 }
 function chatKey(scope, target){ return `${scope}::${normPath(target)}`; }
-function openChat(scope, target){
-  if(!_allResults.length){ alert('请先分析目录，再打开清理顾问'); return; }
+function openChat(scope, target, autoAssess = false){
+  if(!_allResults.length){ alert('请先分析目录，再打开智能建议'); return; }
   scope = scope || 'scan';
   target = target || '';
   if(scope === 'folder' && target && _allResults.some(r=>normPath(r.path)===normPath(target))) scope = 'file';
@@ -454,25 +484,36 @@ function openChat(scope, target){
   // 叉号只是收起面板；同一范围重新打开时复用会话和消息。
   if(_chatSession && _chatKey === key){
     $('chatPanel').classList.add('open');
+    document.body.classList.add('chat-open');
     $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
     $('chatText').focus();
     return;
   }
-  api('/api/chat/session', {scope, target}).then(r=>{
+  const previousSession = _chatSession;
+  const payload = {scope, target};
+  if(previousSession) payload.session_id = previousSession.session_id;
+  api('/api/chat/session', payload).then(r=>{
     if(r.error){ alert(r.error); return; }
     _chatSession = r.session;
     _chatTarget = r.session.target || target;
     _chatScope = scope;
     _chatKey = key;
     $('chatPanel').classList.add('open');
+    document.body.classList.add('chat-open');
     $('chatContext').textContent =
       `${chatScopeLabel(scope)} · ${r.session.target || '本次扫描'} · ${r.session.file_count} 个文件 · ${r.session.total_mb} MB · ${r.session.verdict_label || ''}`;
-    $('chatMessages').innerHTML = '';
-    addChatMessage('assistant',
-      `已读取本次扫描的 ${r.session.file_count} 个文件，共 ${r.session.total_mb} MB。\n` +
-      `结论：${r.session.verdict_label || '需要确认'}\n${r.session.summary || ''}`);
+    // 已经有会话时只切换评估范围，保留同一段对话；新会话才清空。
+    if(!previousSession) $('chatMessages').innerHTML = '';
     renderQuick(scope);
+    if(autoAssess) askOverallAssessment(scope);
   });
+}
+function askOverallAssessment(scope){
+  const question = scope === 'file'
+    ? '请整体评估这个文件：它是什么、能不能清理、有什么风险？'
+    : '请整体评估这个目录：哪些能清理、哪些必须保留、有哪些风险？';
+  $('chatText').value = question;
+  sendChat();
 }
 function renderQuick(scope){
   const questions = scope === 'file'
@@ -496,6 +537,7 @@ function closeChat(){
   // 只隐藏，不销毁会话；再次打开同一范围会恢复对话。
   if(_chatES){ _chatES.close(); _chatES = null; }
   $('chatPanel').classList.remove('open');
+  document.body.classList.remove('chat-open');
 }
 function resetChatState(){
   if(_chatES){ _chatES.close(); _chatES = null; }
@@ -503,7 +545,9 @@ function resetChatState(){
   _chatKey = '';
   _chatTarget = '';
   _chatScope = 'scan';
+  _lastPlanPaths = [];
   $('chatPanel').classList.remove('open');
+  document.body.classList.remove('chat-open');
   $('chatMessages').innerHTML =
     '<div class="chat-msg assistant">我会根据本次扫描结果解释文件用途、评估文件夹，并检查跨目录关联。</div>';
 }
@@ -596,11 +640,12 @@ function sendChat(){
   };
 }
 async function requestChatPlan(){
-  if(!_chatSession){ alert('请先打开清理顾问并完成一次问答'); return; }
+  if(!_chatSession){ alert('请先打开智能建议并完成一次问答'); return; }
   const r = await api('/api/chat/plan', {session_id:_chatSession.session_id, mode:'backup'});
   if(r.error){ alert(r.error); return; }
   const plan = r.plan || {};
   const paths = plan.paths || [];
+  _lastPlanPaths = paths.slice();
   const lines = [
     `清理计划（未执行）`,
     `模式：${plan.mode || 'backup'} · 文件：${paths.length} 个 · 预计移动：${plan.total_mb || 0} MB`,
@@ -609,8 +654,47 @@ async function requestChatPlan(){
   if(r.warning) lines.push(`注意：${r.warning}`);
   lines.push('', ...paths.slice(0,20));
   if(paths.length > 20) lines.push(`...另有 ${paths.length - 20} 个文件`);
-  lines.push('', '这只是一个计划。请回到结果表勾选确认后，再使用“清理选中”。');
-  addChatMessage('assistant', lines.join('\n'));
+  lines.push('', '确认后可以点击下方“按照计划清理”。');
+  const box = addChatMessage('assistant', lines.join('\n'));
+  if(paths.length){
+    const btn = document.createElement('button');
+    btn.className = 'plan-clean-btn';
+    btn.textContent = '按照计划清理';
+    btn.onclick = applyPlanAndClean;
+    box.appendChild(btn);
+  }
+}
+
+async function applyPlanAndClean(){
+  if(!_lastPlanPaths.length) return alert('当前没有可执行的清理计划');
+  const filterSize = $('filterSize'), filterDecision = $('filterDecision');
+  if(filterSize) filterSize.value = '0';
+  if(filterDecision) filterDecision.value = 'all';
+  if($('filterFile')) $('filterFile').value = '';
+  if($('filterReason')) $('filterReason').value = '';
+  applyFilters();
+
+  document.querySelectorAll('#resultsTable tbody input[type=checkbox]')
+    .forEach(cb => { cb.checked = false; });
+
+  const wanted = new Set(_lastPlanPaths.map(normPath));
+  let matched = 0;
+  document.querySelectorAll('#resultsTable tbody tr').forEach(tr => {
+    const cb = tr.querySelector('input[type=checkbox]');
+    if(!cb || cb.disabled) return;
+    if(wanted.has(normPath(cb.value))){
+      cb.checked = true;
+      matched += 1;
+    }
+  });
+  updateSelectAll();
+  if(!matched){
+    return alert('计划中的文件不在当前结果表里，请重新分析后再生成计划');
+  }
+  const missing = _lastPlanPaths.length - matched;
+  const note = missing > 0 ? `\n计划共 ${_lastPlanPaths.length} 个，当前结果匹配 ${matched} 个。` : '';
+  if(!confirm(`将按计划清理 ${matched} 个文件（先移到备份区）。${note}\n确认继续？`)) return;
+  await cleanSelected(true);
 }
 async function chatAction(type){
   if(type === 'draft_plan'){ await requestChatPlan(); }

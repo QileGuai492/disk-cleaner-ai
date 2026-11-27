@@ -351,7 +351,13 @@ class GUIHandler(BaseHTTPRequestHandler):
                 result = evt["result"]
                 results_buf.append(result)
                 GUIHandler.scanned_paths.add(os.path.abspath(result["path"]))
-                self._sse_send({"type": "progress", "current": evt["current"], "total": evt["total"], "result": result})
+                self._sse_send({
+                    "type": "progress",
+                    "current": evt["current"],
+                    "total": evt["total"],
+                    "result": result,
+                    "stats": eng.stats,
+                })
 
             GUIHandler.last_results = results_buf
             try:
@@ -447,15 +453,18 @@ class GUIHandler(BaseHTTPRequestHandler):
             "warning": "；".join(plan.warnings),
         })
 
-    # ---- 清理顾问 ---------------------------------------------------
+    # ---- 智能建议 ---------------------------------------------------
     def _handle_chat_session(self, data: dict):
         results = GUIHandler.last_results or []
         if not results:
-            self._respond_json({"error": "请先分析目录，再打开清理顾问"}, status=400)
+            self._respond_json({"error": "请先分析目录，再打开智能建议"}, status=400)
             return
         scope = data.get("scope", "scan")
         target = data.get("target", "")
-        context = self._chat().create_session(results, scope=scope, target=target)
+        context = self._chat().create_session(
+            results, scope=scope, target=target,
+            session_id=str(data.get("session_id", "")),
+        )
         self._respond_json({"session": context.summary_for_ui()})
 
     def _handle_chat_message(self, data: dict):
@@ -481,7 +490,7 @@ class GUIHandler(BaseHTTPRequestHandler):
 
         context = self._chat().get(session_id)
         if context is None:
-            self._sse_send({"type": "error", "message": "会话不存在或已过期，请重新打开清理顾问"})
+            self._sse_send({"type": "error", "message": "会话不存在或已过期，请重新打开智能建议"})
             return
         self._sse_send({"type": "meta", "session": context.summary_for_ui()})
         answer = self._chat().answer(session_id, text, provider=provider)
@@ -546,16 +555,24 @@ class GUIHandler(BaseHTTPRequestHandler):
                 "file_count": len(batch.get("files", [])),
                 "total_bytes": sum(int(f.get("size") or 0) for f in batch.get("files", [])),
             })
-        self._respond_json({"batches": batches})
+        self._respond_json({"batches": batches, "files": manager.list_files()})
 
     def _handle_restore_backup(self, data: dict):
-        batch_id = str(data.get("batch_id", ""))
         manager = BackupManager()
-        valid = {b.get("batch_id") for b in manager.list_batches()}
-        if not batch_id or batch_id not in valid:
-            self._respond_json({"error": "备份批次不存在"}, status=404)
-            return
-        results = manager.restore_batch(batch_id)
+        items = data.get("items")
+        if isinstance(items, list):
+            items = [item for item in items if isinstance(item, dict)]
+            if not items:
+                self._respond_json({"error": "没有选择要恢复的文件"}, status=400)
+                return
+            results = manager.restore_files(items)
+        else:
+            batch_id = str(data.get("batch_id", ""))
+            valid = {b.get("batch_id") for b in manager.list_batches()}
+            if not batch_id or batch_id not in valid:
+                self._respond_json({"error": "备份批次不存在"}, status=404)
+                return
+            results = manager.restore_batch(batch_id)
         success = [r for r in results if r.success]
         failed = [r for r in results if not r.success]
         self._respond_json({

@@ -1,4 +1,4 @@
-"""清理顾问 HTTP API 测试。"""
+"""智能建议 HTTP API 测试。"""
 
 import json
 import threading

@@ -55,7 +55,7 @@ def test_page_contains_session_token(gui_server):
         body = response.read().decode("utf-8")
     assert "/static/app.js" in body
     assert "chatPanel" in body
-    assert "清理顾问" in body
+    assert "智能建议" in body
 
     with urllib.request.urlopen(gui_server + "/static/app.js", timeout=5) as response:
         script = response.read().decode("utf-8")

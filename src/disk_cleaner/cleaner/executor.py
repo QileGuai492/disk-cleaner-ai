@@ -114,38 +114,92 @@ class BackupManager:
                 batches.append(json.loads(manifest.read_text(encoding="utf-8")))
         return batches
 
-    def restore_batch(self, batch_id: str) -> list[CleanResult]:
-        """恢复一个批次中的所有文件"""
-        batch_dir = self.backup_root / batch_id
-        manifest = batch_dir / "manifest.json"
-        if not manifest.exists():
+    def list_files(self) -> list[dict]:
+        """列出所有仍可恢复的备份文件（按备份时间倒序）。"""
+        items: list[dict] = []
+        for batch in self.list_batches():
+            batch_id = batch.get("batch_id", "")
+            for file_info in batch.get("files", []):
+                backup_path = Path(str(file_info.get("backup_path", "")))
+                original_path = str(file_info.get("original_path", ""))
+                if not original_path or not backup_path.exists():
+                    continue
+                items.append({
+                    "batch_id": batch_id,
+                    "backup_path": str(backup_path),
+                    "original_path": original_path,
+                    "name": Path(original_path).name,
+                    "size": int(file_info.get("size") or 0),
+                    "backed_up_at": file_info.get("backed_up_at", ""),
+                })
+        items.sort(key=lambda item: item.get("backed_up_at", ""), reverse=True)
+        return items
+
+    def restore_files(self, items: list[dict]) -> list[CleanResult]:
+        """恢复用户点选的备份文件；不覆盖原位置已有文件。"""
+        selections = {
+            (str(item.get("batch_id", "")), str(item.get("backup_path", "")))
+            for item in items
+        }
+        if not selections:
             return []
 
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-        results = []
-        remaining = []
-        for file_info in data.get("files", []):
-            src = Path(file_info["backup_path"])
-            dest = Path(file_info["original_path"])
-            try:
-                if dest.exists():
-                    raise FileExistsError(f"目标已存在，未覆盖：{dest}")
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dest))
-                results.append(CleanResult(
-                    path=file_info["original_path"], success=True,
-                    bytes_freed=file_info["size"], action="restored",
-                ))
-            except Exception as e:
-                remaining.append(file_info)
-                results.append(CleanResult(
-                    path=file_info["original_path"], success=False,
-                    bytes_freed=0, action="failed", error=str(e),
-                ))
-        # 已恢复的条目从 manifest 移除，避免二次恢复重复搬运
-        data["files"] = remaining
-        manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        by_batch: dict[str, set[str]] = {}
+        for batch_id, backup_path in selections:
+            by_batch.setdefault(batch_id, set()).add(backup_path)
+
+        results: list[CleanResult] = []
+        for batch_id, selected_paths in by_batch.items():
+            batch_dir = self.backup_root / batch_id
+            manifest = batch_dir / "manifest.json"
+            if not manifest.exists():
+                continue
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            remaining = []
+            changed = False
+            for file_info in data.get("files", []):
+                backup_path = str(file_info.get("backup_path", ""))
+                if backup_path not in selected_paths:
+                    remaining.append(file_info)
+                    continue
+
+                src = Path(backup_path)
+                dest = Path(file_info["original_path"])
+                try:
+                    if not src.exists():
+                        raise FileNotFoundError(f"备份文件不存在：{src}")
+                    if dest.exists():
+                        raise FileExistsError(f"目标已存在，未覆盖：{dest}")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src), str(dest))
+                    changed = True
+                    results.append(CleanResult(
+                        path=file_info["original_path"], success=True,
+                        bytes_freed=int(file_info.get("size") or 0), action="restored",
+                    ))
+                except Exception as e:
+                    remaining.append(file_info)
+                    results.append(CleanResult(
+                        path=file_info["original_path"], success=False,
+                        bytes_freed=0, action="failed", error=str(e),
+                    ))
+
+            if changed:
+                data["files"] = remaining
+                manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return results
+
+    def restore_batch(self, batch_id: str) -> list[CleanResult]:
+        """恢复一个批次中的所有文件（保留给 CLI/兼容接口）。"""
+        manifest = self.backup_root / batch_id / "manifest.json"
+        if not manifest.exists():
+            return []
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        selections = [
+            {"batch_id": batch_id, "backup_path": str(f.get("backup_path", ""))}
+            for f in data.get("files", [])
+        ]
+        return self.restore_files(selections)
 
     def delete_batch(self, batch_id: str) -> bool:
         """永久删除备份批次"""

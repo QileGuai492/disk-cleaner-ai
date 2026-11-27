@@ -98,6 +98,39 @@ class TestBackupManager:
         assert (temp_dir / "file_to_clean.tmp").exists()
         assert (temp_dir / "file_to_clean.tmp").read_text() == original_content
 
+    def test_按文件恢复而非整批(self, backup_root, temp_dir):
+        manager = BackupManager(str(backup_root))
+        batch_id = manager.create_batch("test")
+        second = temp_dir / "second.tmp"
+        second.write_text("second", encoding="utf-8")
+        manager.backup_file(str(temp_dir / "file_to_clean.tmp"), batch_id)
+        manager.backup_file(str(second), batch_id)
+
+        files = manager.list_files()
+        assert len(files) == 2
+        selected = next(item for item in files if item["name"] == "file_to_clean.tmp")
+        results = manager.restore_files([selected])
+
+        assert len(results) == 1 and results[0].success
+        assert (temp_dir / "file_to_clean.tmp").exists()
+        assert not second.exists()
+        assert manager.file_count(batch_id) == 1
+        remaining = manager.list_files()
+        assert len(remaining) == 1 and remaining[0]["name"] == "second.tmp"
+
+    def test_按文件恢复不覆盖目标(self, backup_root, temp_dir):
+        manager = BackupManager(str(backup_root))
+        batch_id = manager.create_batch("test")
+        target = temp_dir / "file_to_clean.tmp"
+        manager.backup_file(str(target), batch_id)
+        target.write_text("existing", encoding="utf-8")
+
+        results = manager.restore_files(manager.list_files())
+        assert results and not results[0].success
+        assert "目标已存在" in results[0].error
+        assert target.read_text(encoding="utf-8") == "existing"
+        assert manager.file_count(batch_id) == 1
+
     def test_删除过期批次(self, backup_root, temp_dir):
         manager = BackupManager(str(backup_root))
         batch_id = manager.create_batch("old batch")

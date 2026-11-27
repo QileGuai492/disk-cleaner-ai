@@ -1,4 +1,4 @@
-"""清理顾问（只读聊天服务）测试。"""
+"""智能建议（只读聊天服务）测试。"""
 
 import json
 
@@ -194,6 +194,24 @@ def test_what_if_answer_mentions_backup():
     answer = service.answer(context.session_id, "如果删了会怎样？")
     assert "如果删除" in answer["answer"]
     assert "备份" in answer["answer"]
+
+
+def test_rebind_keeps_same_conversation():
+    folder = "C:/Users/alice/.gradle/caches"
+    results = [
+        _result(f"{folder}/a.jar", "safe_to_delete", 2_000_000),
+        _result(f"{folder}/b.jar", "likely_safe", 1_000_000),
+    ]
+    service = ChatService()
+    context = service.create_session(results, scope="scan")
+    service.answer(context.session_id, "哪些能删？")
+
+    rebound = service.create_session(
+        results, scope="folder", target=folder, session_id=context.session_id
+    )
+    assert rebound.session_id == context.session_id
+    assert rebound.scope == "folder"
+    assert len(rebound.history) == 2
 
 
 def test_session_keeps_short_history():
