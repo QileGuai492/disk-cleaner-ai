@@ -29,6 +29,18 @@ def gui_server():
         GUIHandler.scanned_paths = set()
 
 
+def test_gui_last_scan_roundtrip(tmp_path, monkeypatch):
+    from disk_cleaner.gui import app as gui_app
+
+    monkeypatch.setattr(gui_app, "_GUI_LAST_RESULTS", tmp_path / "last.json")
+    results = [{"path": "C:/Temp/a.tmp", "decision": "safe_to_delete", "size": 1}]
+    gui_app._save_last_results(results)
+    assert gui_app._load_last_results() == results
+
+    gui_app._save_last_results([])
+    assert gui_app._load_last_results() == []
+
+
 def _post(url, payload, token=None, content_type="application/json", origin=None, host=None):
     headers = {"Content-Type": content_type}
     if token:

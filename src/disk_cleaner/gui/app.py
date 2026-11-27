@@ -31,6 +31,37 @@ def _get_db():
     return db
 
 
+_GUI_LAST_RESULTS = Path(os.path.expanduser("~/.disk-cleaner/gui_last_scan.json"))
+
+
+def _save_last_results(results: list[dict]) -> None:
+    """持久化最近一次扫描，避免 GUI 重启后与浏览器缓存不一致。"""
+    try:
+        if not results:
+            _GUI_LAST_RESULTS.unlink(missing_ok=True)
+            return
+        _GUI_LAST_RESULTS.parent.mkdir(parents=True, exist_ok=True)
+        temp = _GUI_LAST_RESULTS.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps({"results": results}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(temp, _GUI_LAST_RESULTS)
+    except OSError:
+        pass
+
+
+def _load_last_results() -> list[dict]:
+    try:
+        data = json.loads(_GUI_LAST_RESULTS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    results = data.get("results", []) if isinstance(data, dict) else []
+    if not isinstance(results, list):
+        return []
+    return [r for r in results if isinstance(r, dict) and r.get("path")]
+
+
 def _model_for(provider: str) -> str:
     defaults = {
         "deepseek": "deepseek-v4-flash",
@@ -71,6 +102,12 @@ class GUIHandler(BaseHTTPRequestHandler):
     port: int = 8765
     scanned_paths: set[str] = set()
     chat_service: ChatService | None = None
+
+    @classmethod
+    def _remember_results(cls, results: list[dict]) -> None:
+        cls.last_results = list(results)
+        cls.scanned_paths = {os.path.abspath(r["path"]) for r in results}
+        _save_last_results(cls.last_results)
 
     # ---- 安全校验 -------------------------------------------------
     def _check_host(self) -> bool:
@@ -291,8 +328,7 @@ class GUIHandler(BaseHTTPRequestHandler):
             GUIHandler.engine = eng
             results = eng.analyze_path(path, top_n=top, recursive=recursive, force=force)
             stats = eng.stats
-            GUIHandler.last_results = results
-            GUIHandler.scanned_paths = {os.path.abspath(r["path"]) for r in results}
+            self._remember_results(results)
             try:
                 from disk_cleaner.db.models import ScanRecord
                 records = ScanRecord(db)
@@ -361,7 +397,7 @@ class GUIHandler(BaseHTTPRequestHandler):
                     "stats": eng.stats,
                 })
 
-            GUIHandler.last_results = results_buf
+            self._remember_results(results_buf)
             try:
                 from disk_cleaner.db.models import ScanRecord
                 records = ScanRecord(db)
@@ -698,6 +734,12 @@ def start_gui(port: int | None = None, open_browser: bool | None = None):
     GUIHandler.port = port
     GUIHandler.scanned_paths = set()
     GUIHandler.last_results = []
+    saved_results = _load_last_results()
+    if saved_results:
+        GUIHandler.last_results = saved_results
+        GUIHandler.scanned_paths = {
+            os.path.abspath(r["path"]) for r in saved_results
+        }
     GUIHandler.chat_service = ChatService()
 
     server = ThreadingHTTPServer(("127.0.0.1", port), GUIHandler)

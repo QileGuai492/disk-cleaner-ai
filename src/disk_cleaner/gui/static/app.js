@@ -528,7 +528,14 @@ function openChat(scope, target, autoAssess = false){
   const payload = {scope, target};
   if(previousSession) payload.session_id = previousSession.session_id;
   api('/api/chat/session', payload).then(r=>{
-    if(r.error){ alert(r.error); return; }
+    if(r.error){
+      if(String(r.error).includes('请先分析目录')){
+        alert('GUI 服务已重启，浏览器里的上次分析结果只是本地缓存；请重新分析一次后再使用智能建议。');
+      } else {
+        alert(r.error);
+      }
+      return;
+    }
     _chatSession = r.session;
     _chatTarget = r.session.target || target;
     _chatScope = scope;
