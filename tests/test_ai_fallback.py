@@ -59,6 +59,14 @@ def test_non_object_json_is_rejected():
     assert "不是 JSON 对象" in result.reason
 
 
+def test_truncated_json_keeps_decision():
+    result = parse_ai_response(
+        '{"decision": "keep", "confidence": 0.9, "reason": "这里是被截断的理由'
+    )
+    assert result.decision == "keep"
+    assert result.confidence == 0.9
+
+
 def test_engine_marks_degraded_and_does_not_cache(tmp_path, db):
     target = tmp_path / "unknown.xyz"
     target.write_text("binary-ish", encoding="utf-8")

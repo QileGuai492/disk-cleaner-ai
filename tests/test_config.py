@@ -30,6 +30,7 @@ def test_save_and_load_roundtrip(tmp_path):
     config.backup.retention_days = 7
     config.scan.max_dirs = 1200
     config.ai.timeout_seconds = 12
+    config.ai.max_output_tokens = 2048
     config.ai.budget_usd = 1.5
     config.ai.input_cost_per_million = 0.15
     config.ai.cloud_blocklist = ["*\\Documents\\*"]
@@ -40,6 +41,7 @@ def test_save_and_load_roundtrip(tmp_path):
     assert loaded.backup.retention_days == 7
     assert loaded.scan.max_dirs == 1200
     assert loaded.ai.timeout_seconds == 12
+    assert loaded.ai.max_output_tokens == 2048
     assert loaded.ai.budget_usd == 1.5
     assert loaded.ai.input_cost_per_million == 0.15
     assert loaded.ai.cloud_blocklist == ["*\\Documents\\*"]

@@ -212,3 +212,8 @@ class TestAIProvider:
     def test_timeout_有下限(self):
         provider = AIProvider.create("openai", api_key="sk-test", timeout_seconds=0.1)
         assert provider.timeout_seconds >= 1.0
+
+    def test_输出预算可配置(self):
+        provider = AIProvider.create("openai", api_key="sk-test", max_output_tokens=4096)
+        assert provider.max_output_tokens == 4096
+        assert AIProvider.create("openai", api_key="sk-test").max_output_tokens == 1200

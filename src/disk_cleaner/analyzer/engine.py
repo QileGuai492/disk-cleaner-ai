@@ -40,6 +40,7 @@ class AnalysisEngine:
         skip_symlinks: bool | None = None,
         ai_max_retries: int | None = None,
         ai_rate_limit_rpm: int | None = None,
+        ai_max_output_tokens: int | None = None,
     ):
         self.db = db
         self.cache = AnalysisCache(db)
@@ -55,6 +56,7 @@ class AnalysisEngine:
         if (
             cloud_blocklist is None or privacy_level is None or max_dirs is None
             or skip_symlinks is None or ai_max_retries is None or ai_rate_limit_rpm is None
+            or ai_max_output_tokens is None
         ):
             try:
                 from disk_cleaner.config import load_config
@@ -71,10 +73,13 @@ class AnalysisEngine:
                     ai_max_retries = config.ai.max_retries
                 if ai_rate_limit_rpm is None:
                     ai_rate_limit_rpm = config.ai.rate_limit_rpm
+                if ai_max_output_tokens is None:
+                    ai_max_output_tokens = config.ai.max_output_tokens
             except Exception:
                 pass
         self.ai_max_retries = ai_max_retries if ai_max_retries is not None else 3
         self.ai_rate_limit_rpm = ai_rate_limit_rpm if ai_rate_limit_rpm is not None else 30
+        self.ai_max_output_tokens = ai_max_output_tokens if ai_max_output_tokens is not None else 1200
         blocked_extensions = config.privacy.extension_blocklist if config is not None else None
         self.anonymizer = PathAnonymizer(
             level=privacy_level or "strict",
@@ -155,6 +160,7 @@ class AnalysisEngine:
     def ai(self) -> AIProvider:
         if self._ai is None:
             timeout_seconds = 30.0
+            max_output_tokens = self.ai_max_output_tokens
             budget_usd = 0.0
             input_cost = 0.0
             output_cost = 0.0
@@ -162,6 +168,7 @@ class AnalysisEngine:
                 from disk_cleaner.config import load_config
                 ai_config = load_config().ai
                 timeout_seconds = ai_config.timeout_seconds
+                max_output_tokens = ai_config.max_output_tokens
                 budget_usd = ai_config.budget_usd
                 input_cost = ai_config.input_cost_per_million
                 output_cost = ai_config.output_cost_per_million
@@ -174,6 +181,7 @@ class AnalysisEngine:
                 max_retries=self.ai_max_retries,
                 rate_limit_rpm=self.ai_rate_limit_rpm,
                 timeout_seconds=timeout_seconds,
+                max_output_tokens=max_output_tokens,
                 budget_usd=budget_usd,
                 input_cost_per_million=input_cost,
                 output_cost_per_million=output_cost,

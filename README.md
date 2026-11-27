@@ -60,6 +60,7 @@ disk-cleaner analyze C:\Users --force
 
 > 云端调用前会对路径脱敏；`.env`、`.pem`、`.key` 等扩展名不会上云。AI 未配置或调用失败时，来源会显示“本地降级”，不会伪装成 AI，也不会写入 AI 缓存。
 > 连续 3 次失败会熔断；配置 `ai.budget_usd` 后，预算用尽也会显式降级。
+> 单文件 AI 输出默认预算为 1200 tokens；如果模型仍返回截断 JSON，可把 `ai.max_output_tokens` 调到 2048。
 
 输出示例：
 ```
@@ -217,7 +218,7 @@ disk-cleaner gui --no-browser       # 不自动打开浏览器
 - SSE 实时进度条、结果逐条呈现
 - 筛选栏：大小、判定、文件名正则、理由正则
 - 点击文件名在资源管理器中定位
-- 清理顾问：单文件/文件夹/整次扫描问答，给证据和清理计划草案（不直接执行）
+- 清理顾问：单文件/文件夹/整次扫描问答；先解释“这是什么”，再给证据和清理计划草案（不直接执行）
 - 恢复备份：按批次恢复已清理文件
 - 全选/批量清理、导出报告；`keep/critical` 行不可勾选
 - 7 套主题切换（右上角下拉）
@@ -323,6 +324,7 @@ disk-cleaner config path      # 显示配置文件路径
     "max_retries": 3,
     "rate_limit_rpm": 30,
     "timeout_seconds": 30,
+    "max_output_tokens": 1200,
     "budget_usd": 0,
     "input_cost_per_million": 0,
     "output_cost_per_million": 0,

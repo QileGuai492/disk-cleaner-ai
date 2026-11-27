@@ -140,6 +140,13 @@ def classify_role(path: str) -> str:
     lower = _normalize(path).lower()
     parts = [p for p in lower.split("/") if p]
     ext = os.path.splitext(lower)[1]
+    filename = parts[-1] if parts else ""
+    if filename in {
+        "build.gradle", "build.gradle.kts",
+        "settings.gradle", "settings.gradle.kts",
+        "gradle-wrapper.jar", "gradle-wrapper.properties",
+    }:
+        return "config"
     if any(part in CACHE_SEGMENTS for part in parts[:-1]) or ext in CACHE_EXTENSIONS:
         return "cache"
     if "appdata/roaming" in lower:

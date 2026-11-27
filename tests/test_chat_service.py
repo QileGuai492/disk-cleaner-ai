@@ -21,6 +21,77 @@ def _result(path, decision="needs_review", size=1000, mtime=1600000000.0, reason
     }
 
 
+def test_gradle_explain_is_friendly_and_not_cleanup_only():
+    target = "C:/Users/alice/.gradle/caches"
+    results = [
+        _result(f"{target}/modules-2/files-2.1/a.jar", "safe_to_delete", 2_000_000),
+        _result(f"{target}/build-cache/a.bin", "safe_to_delete", 1_000_000),
+    ]
+    service = ChatService()
+    context = service.create_session(results, scope="folder", target=target)
+
+    answer = service.answer(context.session_id, "gradle是什么？")
+    assert answer["verdict_label"] == "说明"
+    assert "Gradle" in answer["answer"]
+    assert "构建" in answer["answer"]
+    assert "这不是缓存" not in answer["answer"]
+    assert all(action["type"] != "draft_plan" for action in answer["actions"])
+
+
+def test_gradle_build_script_is_explained_as_keep():
+    target = "D:/Projects/demo/build.gradle"
+    service = ChatService()
+    context = service.create_session(
+        [_result(target, "keep", 2_000)],
+        scope="file",
+        target=target,
+    )
+    answer = service.answer(context.session_id, "这个 build.gradle 是什么？")
+    assert "构建脚本" in answer["answer"]
+    assert "不要删除" in answer["answer"]
+
+
+def test_clean_question_starts_with_what_it_is():
+    target = "C:/Users/alice/.gradle/caches"
+    service = ChatService()
+    context = service.create_session(
+        [_result(f"{target}/a.jar", "safe_to_delete", 2_000_000)],
+        scope="folder",
+        target=target,
+    )
+    answer = service.answer(context.session_id, "这个能删吗？")
+    assert "这是什么" in answer["answer"]
+    assert "Gradle" in answer["answer"]
+
+
+def test_ai_can_explain_concept_without_evidence():
+    target = "C:/Users/alice/.gradle/caches"
+    captured = {}
+
+    class FakeAI:
+        def analyze(self, prompt):
+            captured["prompt"] = prompt
+            return json.dumps({
+                "verdict": "needs_review",
+                "summary": "通用说明：Gradle 是 Java/Kotlin/Android 的构建工具。",
+                "evidence_ids": [],
+                "risks": [],
+                "confidence": 0.7,
+            })
+
+    service = ChatService(ai_factory=lambda provider: FakeAI())
+    context = service.create_session(
+        [_result(f"{target}/a.jar", "safe_to_delete", 2_000_000)],
+        scope="folder",
+        target=target,
+    )
+    answer = service.answer(context.session_id, "gradle是什么？", provider="deepseek")
+    assert answer["source"] == "ai"
+    assert answer["verdict_label"] == "说明"
+    assert all(action["type"] != "draft_plan" for action in answer["actions"])
+    assert "explain" in captured["prompt"]
+
+
 def test_file_session_local_answer():
     target = "C:/Users/alice/AppData/Local/Temp/a.tmp"
     service = ChatService()

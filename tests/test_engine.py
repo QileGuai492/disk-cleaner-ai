@@ -162,7 +162,7 @@ class TestEngineConfig:
             json.dumps({
                 "scan": {"max_dirs": 123, "skip_symlinks": False},
                 "privacy": {"extension_blocklist": [".foo"]},
-                "ai": {"max_retries": 5, "rate_limit_rpm": 7},
+                "ai": {"max_retries": 5, "rate_limit_rpm": 7, "max_output_tokens": 2048},
             }),
             encoding="utf-8",
         )
@@ -171,6 +171,7 @@ class TestEngineConfig:
         assert engine.skip_symlinks is False
         assert engine.ai_max_retries == 5
         assert engine.ai_rate_limit_rpm == 7
+        assert engine.ai_max_output_tokens == 2048
         assert engine.anonymizer.is_blocked_extension("test.foo") is True
 
 

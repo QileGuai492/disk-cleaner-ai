@@ -72,6 +72,31 @@ def _safe_risk(value) -> str:
     return risk if risk in ("none", "low", "medium", "high", "unknown") else "unknown"
 
 
+def _salvage_fields(text: str, is_cluster: bool = False) -> FileAnalysisOutput | None:
+    """JSON 被截断时按字段提取，尽量保留 decision/confidence/reason。"""
+    if not text:
+        return None
+    decision_key = "cluster_decision" if is_cluster else "decision"
+    reason_key = "cluster_reason" if is_cluster else "reason"
+    decision_match = re.search(rf'"{decision_key}"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
+    if not decision_match:
+        decision_match = re.search(r'"decision"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
+    confidence_match = re.search(r'"confidence"\s*:\s*([0-9]+(?:\.[0-9]+)?)', text, re.IGNORECASE)
+    reason_match = re.search(rf'"{reason_key}"\s*:\s*"([^"]*)', text, re.IGNORECASE)
+    risk_match = re.search(r'"risk"\s*:\s*"([^"]+)"', text, re.IGNORECASE)
+    if not decision_match and not reason_match:
+        return None
+    partial_reason = reason_match.group(1) if reason_match else ""
+    if partial_reason:
+        partial_reason += "…（响应被截断，仅恢复部分理由）"
+    return FileAnalysisOutput(
+        decision=_safe_decision(decision_match.group(1) if decision_match else None),
+        confidence=_safe_confidence(confidence_match.group(1) if confidence_match else None, 0.3),
+        reason=partial_reason or "AI 响应被截断，未能恢复理由",
+        risk=_safe_risk(risk_match.group(1) if risk_match else None),
+    )
+
+
 def parse_ai_response(text: str, is_cluster: bool = False) -> FileAnalysisOutput:
     """从 AI 响应文本中解析分析结果（对模型输出做白名单与类型校验）"""
     if not text or not text.strip():
@@ -102,6 +127,9 @@ def parse_ai_response(text: str, is_cluster: bool = False) -> FileAnalysisOutput
             except json.JSONDecodeError:
                 data = None
         if data is None:
+            salvaged = _salvage_fields(text, is_cluster)
+            if salvaged is not None:
+                return salvaged
             return FileAnalysisOutput(
                 decision="needs_review",
                 confidence=0.30,
@@ -184,6 +212,7 @@ def build_single_file_prompt(inp: FileAnalysisInput) -> str:
     lines.append("请以 JSON 格式返回分析结果：")
     lines.append('{"decision": "safe_to_delete|likely_safe|needs_review|keep|critical",')
     lines.append(' "confidence": 0.0~1.0, "reason": "判断理由", "risk": "none|low|medium|high"}')
+    lines.append("只输出一行 JSON，不要 Markdown，不要解释；reason 不超过 80 个中文字符。")
     return "\n".join(lines)
 
 
@@ -242,6 +271,7 @@ class AIProvider:
         max_retries: int = 3,
         rate_limit_rpm: int = 30,
         timeout_seconds: float = 30.0,
+        max_output_tokens: int = 1200,
         budget_usd: float = 0.0,
         input_cost_per_million: float = 0.0,
         output_cost_per_million: float = 0.0,
@@ -254,6 +284,7 @@ class AIProvider:
         self.max_retries = max(1, int(max_retries))
         self.rate_limit_rpm = max(1, int(rate_limit_rpm))
         self.timeout_seconds = max(1.0, float(timeout_seconds))
+        self.max_output_tokens = max(256, int(max_output_tokens))
         self.budget_usd = max(0.0, float(budget_usd))
         self.input_cost_per_million = max(0.0, float(input_cost_per_million))
         self.output_cost_per_million = max(0.0, float(output_cost_per_million))
@@ -429,7 +460,7 @@ class AIProvider:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=500,
+            max_tokens=self.max_output_tokens,
         )
         content = response.choices[0].message.content or ""
         usage = getattr(response, "usage", None)
@@ -467,7 +498,7 @@ class AIProvider:
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=500,
+            max_tokens=self.max_output_tokens,
         )
         content = response.choices[0].message.content or ""
         usage = getattr(response, "usage", None)
@@ -496,7 +527,7 @@ class AIProvider:
             params={"key": key},
             json={
                 "contents": [{"parts": [{"text": self.SYSTEM_PROMPT + "\n\n" + prompt}]}],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 500},
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": self.max_output_tokens},
             },
             timeout=self.timeout_seconds,
         )
@@ -528,7 +559,7 @@ class AIProvider:
         client = anthropic.Anthropic(api_key=self.api_key, timeout=self.timeout_seconds)
         response = client.messages.create(
             model=self.model,
-            max_tokens=500,
+            max_tokens=self.max_output_tokens,
             system=self.SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -558,7 +589,12 @@ class AIProvider:
 
         response = requests.post(
             "http://localhost:11434/api/generate",
-            json={"model": self.model, "prompt": prompt, "stream": False},
+            json={
+                "model": self.model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_predict": self.max_output_tokens},
+            },
             timeout=min(self.timeout_seconds, 60.0),
         )
         if response.status_code != 200:

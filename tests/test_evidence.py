@@ -35,6 +35,7 @@ def test_classify_role_does_not_mistake_catalog_for_log():
     assert classify_role("C:/Users/alice/AppData/Local/Temp/a.tmp") == "cache"
     assert classify_role("C:/Users/alice/Documents/report.docx") == "user_data"
     assert classify_role("C:/Program Files/App/app.exe") == "program"
+    assert classify_role("D:/Projects/demo/build.gradle") == "config"
 
 
 def test_related_groups_oldgame():

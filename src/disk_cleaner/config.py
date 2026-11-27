@@ -42,6 +42,7 @@ class AISettings:
     max_retries: int = 3
     rate_limit_rpm: int = 30
     timeout_seconds: float = 30.0
+    max_output_tokens: int = 1200
     budget_usd: float = 0.0  # 0 表示不限制
     input_cost_per_million: float = 0.0
     output_cost_per_million: float = 0.0
