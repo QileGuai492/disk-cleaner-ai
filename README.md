@@ -56,11 +56,15 @@ disk-cleaner analyze C:\Users -p ollama -m qwen2.5:1.5b
 
 # 强制重新分析（忽略缓存）
 disk-cleaner analyze C:\Users --force
+
+# 云端 AI 4 路并发（默认读取配置；本地 provider 始终串行）
+disk-cleaner analyze C:\Users -p deepseek --jobs 4
 ```
 
 > 云端调用前会对路径脱敏；`.env`、`.pem`、`.key` 等扩展名不会上云。AI 未配置或调用失败时，来源会显示“本地降级”，不会伪装成 AI，也不会写入 AI 缓存。
 > 连续 3 次失败会熔断；配置 `ai.budget_usd` 后，预算用尽也会显式降级。
 > 单文件 AI 输出默认预算为 1200 tokens；如果模型仍返回截断 JSON，可把 `ai.max_output_tokens` 调到 2048。
+> AI 分析默认 4 路并发（`ai.max_concurrency`，或 `analyze --jobs N`）；实际速度仍受 `ai.rate_limit_rpm` 限流和预算约束。
 
 输出示例：
 ```
@@ -218,7 +222,7 @@ disk-cleaner gui --no-browser       # 不自动打开浏览器
 - SSE 实时进度条、结果逐条呈现
 - 筛选栏：大小、判定、文件名正则、理由正则
 - 点击文件名在资源管理器中定位
-- 清理顾问：单文件/文件夹/整次扫描问答；先解释“这是什么”，再给证据和清理计划草案（不直接执行）
+- 清理顾问：单文件/文件夹/整次扫描问答；先解释“这是什么”，再给证据和清理计划草案（不直接执行）；关闭面板再打开会恢复当前对话，“新对话”才会重置
 - 恢复备份：按批次恢复已清理文件
 - 全选/批量清理、导出报告；`keep/critical` 行不可勾选
 - 7 套主题切换（右上角下拉）
@@ -325,6 +329,7 @@ disk-cleaner config path      # 显示配置文件路径
     "rate_limit_rpm": 30,
     "timeout_seconds": 30,
     "max_output_tokens": 1200,
+    "max_concurrency": 4,
     "budget_usd": 0,
     "input_cost_per_million": 0,
     "output_cost_per_million": 0,

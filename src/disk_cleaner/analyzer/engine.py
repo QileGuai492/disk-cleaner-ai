@@ -3,6 +3,7 @@
 import os
 import re
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -41,6 +42,7 @@ class AnalysisEngine:
         ai_max_retries: int | None = None,
         ai_rate_limit_rpm: int | None = None,
         ai_max_output_tokens: int | None = None,
+        ai_max_concurrency: int | None = None,
     ):
         self.db = db
         self.cache = AnalysisCache(db)
@@ -56,7 +58,7 @@ class AnalysisEngine:
         if (
             cloud_blocklist is None or privacy_level is None or max_dirs is None
             or skip_symlinks is None or ai_max_retries is None or ai_rate_limit_rpm is None
-            or ai_max_output_tokens is None
+            or ai_max_output_tokens is None or ai_max_concurrency is None
         ):
             try:
                 from disk_cleaner.config import load_config
@@ -75,11 +77,14 @@ class AnalysisEngine:
                     ai_rate_limit_rpm = config.ai.rate_limit_rpm
                 if ai_max_output_tokens is None:
                     ai_max_output_tokens = config.ai.max_output_tokens
+                if ai_max_concurrency is None:
+                    ai_max_concurrency = config.ai.max_concurrency
             except Exception:
                 pass
         self.ai_max_retries = ai_max_retries if ai_max_retries is not None else 3
         self.ai_rate_limit_rpm = ai_rate_limit_rpm if ai_rate_limit_rpm is not None else 30
         self.ai_max_output_tokens = ai_max_output_tokens if ai_max_output_tokens is not None else 1200
+        self.ai_max_concurrency = max(1, ai_max_concurrency if ai_max_concurrency is not None else 4)
         blocked_extensions = config.privacy.extension_blocklist if config is not None else None
         self.anonymizer = PathAnonymizer(
             level=privacy_level or "strict",
@@ -269,17 +274,7 @@ class AnalysisEngine:
             else:
                 needs_ai.append(fi)
 
-        for fi in needs_ai:
-            if self._cancelled:
-                results.append(AnalysisResult(
-                    path=fi.path, name=fi.name, size=fi.size,
-                    size_mb=fi.size_mb, extension=fi.extension,
-                    mtime=fi.mtime, decision="needs_review",
-                    confidence=0.0, reason="分析已取消", risk="none", source="cancelled",
-                ))
-                continue
-            ai_result = self._analyze_single(fi)
-            results.append(ai_result)
+        results.extend(self._iter_analyzed(needs_ai))
 
         # 排序：当前目录文件在前，子目录按路径聚拢；同目录内按判定优先级→大小降序
         decision_order = {"safe_to_delete": 0, "likely_safe": 1, "needs_review": 2, "keep": 3, "critical": 4}
@@ -374,13 +369,12 @@ class AnalysisEngine:
                 continue
             needs_ai.append(fi)
 
-        # 第三遍：AI/本地分析，逐文件 yield
-        for fi in needs_ai:
-            if self._cancelled:
+        # 第三遍：AI/本地分析，按完成顺序流式 yield
+        for ai_result in self._iter_analyzed(needs_ai):
+            if ai_result.get("source") == "cancelled":
                 self._flush_cache()
                 yield {"type": "cancelled", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total}
                 return
-            ai_result = self._analyze_single(fi)
             learnable_results.append(ai_result)
             yield {"type": "result", "current": self._stats["cache_hits"] + self._stats["rule_hits"] + self._stats["ai_calls"], "total": total, "result": ai_result}
 
@@ -444,12 +438,17 @@ class AnalysisEngine:
         return count
 
     def _analyze_single(self, fi: FileInfo) -> dict:
-        """分析单个文件：云端 AI 失败时显式降级，绝不冒充 AI。"""
-        self._stats["ai_calls"] += 1
+        """串行分析入口；并行路径复用 _compute_analysis + 主线程提交。"""
+        computed = self._compute_analysis(fi)
+        self._commit_analysis(computed)
+        return computed["result"]
+
+    def _compute_analysis(self, fi: FileInfo) -> dict:
+        """纯计算：不写缓存、不改统计，可由工作线程安全调用。"""
         use_cloud = self.ai_provider != "local"
 
         if use_cloud and not self.anonymizer.should_send_to_cloud(fi.path, self.cloud_blocklist):
-            return self._analyze_local(
+            return self._compute_local(
                 fi,
                 "该文件类型或路径禁止上传云端，已用本地规则判断",
                 source="local",
@@ -472,27 +471,129 @@ class AnalysisEngine:
         if not use_cloud:
             response = self._local_ai.analyze(prompt)
             output = parse_ai_response(response)
-            self._save_to_cache(
-                fi, output.decision, output.confidence, output.reason, "local", output.risk
-            )
-            return self._result_from_output(fi, output, "local")
+            return self._computed(fi, output, "local", cache=True)
 
         try:
             response = self.ai.analyze(prompt)
         except AIUnavailableError as e:
-            self._stats["degraded"] += 1
             try:
                 from disk_cleaner.logging_utils import get_logger
                 get_logger("engine").warning("AI 不可用，降级为本地规则: %s (%s)", fi.path, e)
             except Exception:
                 pass
-            return self._analyze_local(fi, f"AI 不可用：{e}", source="degraded")
+            return self._compute_local(fi, f"AI 不可用：{e}", source="degraded")
 
         output = parse_ai_response(response)
-        self._save_to_cache(
-            fi, output.decision, output.confidence, output.reason, "ai", output.risk
+        return self._computed(fi, output, "ai", cache=True)
+
+    def _compute_local(self, fi: FileInfo, note: str, source: str) -> dict:
+        """本地启发式分析；degraded 结果不写入缓存。"""
+        inp = self._build_input(fi, fi.path)
+        prompt = build_single_file_prompt(inp)
+        response = self._local_ai.analyze(prompt)
+        output = parse_ai_response(response)
+        reason = f"{note}；{output.reason}" if note else output.reason
+        return self._computed(fi, output, source, cache=(source == "local"), reason=reason)
+
+    def _computed(self, fi: FileInfo, output, source: str, cache: bool, reason: str | None = None) -> dict:
+        result = self._result_from_output(fi, output, source, reason=reason)
+        entry = None
+        if cache:
+            entry = {
+                "file_path": fi.path,
+                "mtime": int(fi.mtime),
+                "size_bytes": fi.size,
+                "decision": output.decision,
+                "confidence": output.confidence,
+                "reason": output.reason if reason is None else reason,
+                "risk": output.risk,
+                "ai_model": f"{self.ai_model}({source})",
+            }
+        return {
+            "result": result,
+            "cache": entry,
+            "degraded": source == "degraded",
+        }
+
+    def _commit_analysis(self, computed: dict) -> None:
+        """主线程统一提交缓存和统计。"""
+        self._stats["ai_calls"] += 1
+        if computed.get("degraded"):
+            self._stats["degraded"] += 1
+        entry = computed.get("cache")
+        if entry:
+            self._cache_buffer.append(entry)
+            if len(self._cache_buffer) >= 50:
+                self._flush_cache()
+
+    @staticmethod
+    def _cancelled_result(fi: FileInfo) -> AnalysisResult:
+        return AnalysisResult(
+            path=fi.path, name=fi.name, size=fi.size,
+            size_mb=fi.size_mb, extension=fi.extension,
+            mtime=fi.mtime, decision="needs_review",
+            confidence=0.0, reason="分析已取消", risk="none", source="cancelled",
         )
-        return self._result_from_output(fi, output, "ai")
+
+    def _failed_computed(self, fi: FileInfo, exc: Exception) -> dict:
+        try:
+            from disk_cleaner.logging_utils import get_logger
+            get_logger("engine").warning("文件分析异常，降级为本地规则: %s (%s)", fi.path, exc)
+        except Exception:
+            pass
+        return self._compute_local(fi, f"分析异常：{exc}", source="degraded")
+
+    def _iter_analyzed(self, items: list[FileInfo]):
+        """按完成顺序产出 AI 分析结果；工作线程只计算，主线程提交。"""
+        total = len(items)
+        workers = min(self.ai_max_concurrency, total)
+        if workers <= 1 or self.ai_provider == "local" or total < 8:
+            for fi in items:
+                if self._cancelled:
+                    yield self._cancelled_result(fi)
+                    continue
+                computed = self._compute_analysis(fi)
+                self._commit_analysis(computed)
+                yield computed["result"]
+            return
+
+        # 在提交任务前创建共享 provider，避免多个线程同时懒加载。
+        if self.ai_provider != "local":
+            _ = self.ai
+
+        item_iter = iter(items)
+        pending = {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="dc-ai") as pool:
+            def fill() -> None:
+                while len(pending) < workers * 2:
+                    try:
+                        fi = next(item_iter)
+                    except StopIteration:
+                        return
+                    if self._cancelled:
+                        return
+                    pending[pool.submit(self._compute_analysis, fi)] = fi
+
+            fill()
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    fi = pending.pop(future)
+                    try:
+                        computed = future.result()
+                    except Exception as exc:
+                        computed = self._failed_computed(fi, exc)
+                    self._commit_analysis(computed)
+                    yield computed["result"]
+                if self._cancelled:
+                    for future in pending:
+                        future.cancel()
+                    break
+                fill()
+
+        if self._cancelled:
+            for fi in item_iter:
+                yield self._cancelled_result(fi)
 
     def _build_input(self, fi: FileInfo, display_path: str) -> FileAnalysisInput:
         keywords = [

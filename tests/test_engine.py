@@ -3,6 +3,8 @@
 import json
 import os
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -162,7 +164,10 @@ class TestEngineConfig:
             json.dumps({
                 "scan": {"max_dirs": 123, "skip_symlinks": False},
                 "privacy": {"extension_blocklist": [".foo"]},
-                "ai": {"max_retries": 5, "rate_limit_rpm": 7, "max_output_tokens": 2048},
+                "ai": {
+                    "max_retries": 5, "rate_limit_rpm": 7,
+                    "max_output_tokens": 2048, "max_concurrency": 6,
+                },
             }),
             encoding="utf-8",
         )
@@ -172,6 +177,7 @@ class TestEngineConfig:
         assert engine.ai_max_retries == 5
         assert engine.ai_rate_limit_rpm == 7
         assert engine.ai_max_output_tokens == 2048
+        assert engine.ai_max_concurrency == 6
         assert engine.anonymizer.is_blocked_extension("test.foo") is True
 
 
@@ -218,3 +224,80 @@ class TestAnalysisResult:
             # 应该包含较大的文件
             paths = [r["path"] for r in results]
             assert any("setup.exe" in p or "data.db" in p or "debug.log" in p for p in paths)
+
+
+class TestParallelAnalysis:
+    class FakeAI:
+        def __init__(self):
+            self.active = 0
+            self.max_active = 0
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def analyze(self, prompt):
+            with self.lock:
+                self.active += 1
+                self.calls += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.12)
+            with self.lock:
+                self.active -= 1
+            return json.dumps({
+                "decision": "needs_review",
+                "confidence": 0.6,
+                "reason": "并行测试",
+                "risk": "medium",
+            })
+
+    def test_多文件并发分析且结果完整(self, db, tmp_path, monkeypatch):
+        for index in range(8):
+            (tmp_path / f"unknown_{index}.xyz").write_text("x", encoding="utf-8")
+
+        engine = AnalysisEngine(
+            db, ai_provider="openai", ai_model="fake",
+            ai_max_concurrency=4, ai_max_output_tokens=1200,
+        )
+        fake = self.FakeAI()
+        engine._ai = fake
+        monkeypatch.setattr(engine.rules, "evaluate", lambda fi: None)
+
+        results = engine.analyze_directory(str(tmp_path), top_n=20)
+        assert len(results) == 8
+        assert fake.calls == 8
+        assert fake.max_active >= 2
+        assert engine.stats["ai_calls"] == 8
+        assert all(r["source"] == "ai" for r in results)
+
+    def test_流式分析也能并发完成(self, db, tmp_path, monkeypatch):
+        for index in range(8):
+            (tmp_path / f"stream_{index}.xyz").write_text("x", encoding="utf-8")
+
+        engine = AnalysisEngine(
+            db, ai_provider="openai", ai_model="fake",
+            ai_max_concurrency=4, ai_max_output_tokens=1200,
+        )
+        fake = self.FakeAI()
+        engine._ai = fake
+        monkeypatch.setattr(engine.rules, "evaluate", lambda fi: None)
+
+        events = list(engine.analyze_directory_stream(str(tmp_path), top_n=20))
+        results = [e["result"] for e in events if e.get("type") == "result"]
+        assert len(results) == 8
+        assert fake.calls == 8
+        assert not any(e.get("type") == "cancelled" for e in events)
+
+    def test_并发数为1时串行(self, db, tmp_path, monkeypatch):
+        for index in range(8):
+            (tmp_path / f"single_{index}.xyz").write_text("x", encoding="utf-8")
+
+        engine = AnalysisEngine(
+            db, ai_provider="openai", ai_model="fake",
+            ai_max_concurrency=1, ai_max_output_tokens=1200,
+        )
+        fake = self.FakeAI()
+        engine._ai = fake
+        monkeypatch.setattr(engine.rules, "evaluate", lambda fi: None)
+
+        results = engine.analyze_directory(str(tmp_path), top_n=20)
+        assert len(results) == 8
+        assert fake.max_active == 1

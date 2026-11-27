@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -293,6 +294,8 @@ class AIProvider:
         self._total_tokens = 0
         self._budget_used = 0.0
         self._consecutive_failures = 0
+        self._state_lock = threading.RLock()
+        self._rate_lock = threading.Lock()
 
     @classmethod
     def create(cls, provider: str, api_key: str = "", model: str = "", **kwargs) -> "AIProvider":
@@ -312,13 +315,14 @@ class AIProvider:
 
     @property
     def stats(self) -> dict:
-        return {
-            "total_calls": self._total_calls,
-            "total_tokens": self._total_tokens,
-            "budget_used": self._budget_used,
-            "budget_usd": self.budget_usd,
-            "consecutive_failures": self._consecutive_failures,
-        }
+        with self._state_lock:
+            return {
+                "total_calls": self._total_calls,
+                "total_tokens": self._total_tokens,
+                "budget_used": self._budget_used,
+                "budget_usd": self.budget_usd,
+                "consecutive_failures": self._consecutive_failures,
+            }
 
     def _get_key(self) -> str:
         """获取 API Key：传入值 → KeyStore → 环境变量。"""
@@ -342,7 +346,8 @@ class AIProvider:
     def analyze(self, prompt: str) -> str:
         """发送 prompt；失败时抛 AIUnavailableError，绝不伪造 AI 结果。"""
         if self.provider_name == "local":
-            self._total_calls += 1
+            with self._state_lock:
+                self._total_calls += 1
             return self._mock_analyze(prompt)
 
         if not self.api_key:
@@ -351,12 +356,13 @@ class AIProvider:
         if self.provider_name in ("openai", "claude", "deepseek", "gemini") and not self.api_key:
             raise AIUnavailableError(f"{self.provider_name} 未配置 API Key")
 
-        if self.budget_usd > 0 and self._budget_used >= self.budget_usd:
-            raise AIUnavailableError(
-                f"AI 预算已用尽（{self._budget_used:.4f}/{self.budget_usd:.4f} USD）"
-            )
-        if self._consecutive_failures >= 3:
-            raise AIUnavailableError("连续多次调用失败，已熔断；请检查网络、Key 或模型名")
+        with self._state_lock:
+            if self.budget_usd > 0 and self._budget_used >= self.budget_usd:
+                raise AIUnavailableError(
+                    f"AI 预算已用尽（{self._budget_used:.4f}/{self.budget_usd:.4f} USD）"
+                )
+            if self._consecutive_failures >= 3:
+                raise AIUnavailableError("连续多次调用失败，已熔断；请检查网络、Key 或模型名")
 
         self._rate_limit()
         last_error = ""
@@ -366,18 +372,21 @@ class AIProvider:
                 result = self._call(prompt)
 
                 if result and result.strip():
-                    self._total_calls += 1
-                    self._consecutive_failures = 0
+                    with self._state_lock:
+                        self._total_calls += 1
+                        self._consecutive_failures = 0
                     return result
                 last_error = "空响应"
 
             except AIUnavailableError:
-                self._consecutive_failures += 1
+                with self._state_lock:
+                    self._consecutive_failures += 1
                 raise
             except Exception as e:
                 last_error = str(e)
                 if self._is_non_retryable(e):
-                    self._consecutive_failures += 1
+                    with self._state_lock:
+                        self._consecutive_failures += 1
                     raise AIUnavailableError(
                         f"{self.provider_name} 调用失败（不可重试）: {last_error}"
                     ) from e
@@ -385,7 +394,8 @@ class AIProvider:
                     wait = 2 ** attempt  # 指数退避: 1s, 2s, 4s
                     time.sleep(wait)
 
-        self._consecutive_failures += 1
+        with self._state_lock:
+            self._consecutive_failures += 1
         raise AIUnavailableError(
             f"{self.provider_name} 调用失败（{self.max_retries} 次重试）: {last_error}"
         )
@@ -394,11 +404,12 @@ class AIProvider:
         """记录 token 与按配置费率估算的费用。"""
         prompt_tokens = max(0, int(prompt_tokens or 0))
         completion_tokens = max(0, int(completion_tokens or 0))
-        self._total_tokens += prompt_tokens + completion_tokens
-        self._budget_used += (
-            prompt_tokens / 1_000_000 * self.input_cost_per_million
-            + completion_tokens / 1_000_000 * self.output_cost_per_million
-        )
+        with self._state_lock:
+            self._total_tokens += prompt_tokens + completion_tokens
+            self._budget_used += (
+                prompt_tokens / 1_000_000 * self.input_cost_per_million
+                + completion_tokens / 1_000_000 * self.output_cost_per_million
+            )
 
     @staticmethod
     def _is_non_retryable(exc: Exception) -> bool:
@@ -417,18 +428,18 @@ class AIProvider:
         return [self.analyze(p) for p in prompts]
 
     def _rate_limit(self) -> None:
-        """速率限制：确保不超过 rate_limit_rpm 次/分钟"""
-        now = time.time()
-        cutoff = now - 60
-        self._call_times = [t for t in self._call_times if t > cutoff]
-
-        if len(self._call_times) >= self.rate_limit_rpm:
-            oldest = self._call_times[0]
-            wait = oldest + 60 - now + 0.5
+        """滑动窗口限流；锁只保护时间表，等待在锁外进行。"""
+        while True:
+            with self._rate_lock:
+                now = time.time()
+                cutoff = now - 60
+                self._call_times = [t for t in self._call_times if t > cutoff]
+                if len(self._call_times) < self.rate_limit_rpm:
+                    self._call_times.append(now)
+                    return
+                wait = self._call_times[0] + 60 - now + 0.5
             if wait > 0:
                 time.sleep(wait)
-
-        self._call_times.append(now)
 
     def _call(self, prompt: str) -> str:
         """默认实现；具体 provider 子类会覆盖。"""

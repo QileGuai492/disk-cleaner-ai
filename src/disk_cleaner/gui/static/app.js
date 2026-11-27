@@ -1,7 +1,7 @@
 const DC_TOKEN = "__DC_TOKEN__";
 let _busy = false, _ctrl = null;
 let _allResults = [];
-let _chatSession = null, _chatTarget = '', _chatScope = 'scan', _chatES = null;
+let _chatSession = null, _chatTarget = '', _chatScope = 'scan', _chatKey = '', _chatES = null;
 const $=id=>document.getElementById(id);
 
 async function api(path, data) {
@@ -108,6 +108,7 @@ async function handleScan() {
   let _es = null;  // EventSource 引用，供取消用
   let _results = [];
   _allResults = [];
+  resetChatState();
   try {
     const p=cleanPath($('path').value), t=parseInt($('top').value), r=$('recursive').checked,
           ai=$('useAI').checked, prov=$('provider').value, f=false;
@@ -443,16 +444,26 @@ function normPath(p){return String(p||'').replace(/\\/g,'/').replace(/\/$/,'').t
 function chatScopeLabel(scope){
   return {file:'单文件',folder:'文件夹',selection:'多选',scan:'本次扫描'}[scope]||scope;
 }
+function chatKey(scope, target){ return `${scope}::${normPath(target)}`; }
 function openChat(scope, target){
   if(!_allResults.length){ alert('请先分析目录，再打开清理顾问'); return; }
   scope = scope || 'scan';
   target = target || '';
   if(scope === 'folder' && target && _allResults.some(r=>normPath(r.path)===normPath(target))) scope = 'file';
+  const key = chatKey(scope, target);
+  // 叉号只是收起面板；同一范围重新打开时复用会话和消息。
+  if(_chatSession && _chatKey === key){
+    $('chatPanel').classList.add('open');
+    $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
+    $('chatText').focus();
+    return;
+  }
   api('/api/chat/session', {scope, target}).then(r=>{
     if(r.error){ alert(r.error); return; }
     _chatSession = r.session;
     _chatTarget = r.session.target || target;
     _chatScope = scope;
+    _chatKey = key;
     $('chatPanel').classList.add('open');
     $('chatContext').textContent =
       `${chatScopeLabel(scope)} · ${r.session.target || '本次扫描'} · ${r.session.file_count} 个文件 · ${r.session.total_mb} MB · ${r.session.verdict_label || ''}`;
@@ -482,8 +493,25 @@ function addChatMessage(role, text){
   return div;
 }
 function closeChat(){
+  // 只隐藏，不销毁会话；再次打开同一范围会恢复对话。
   if(_chatES){ _chatES.close(); _chatES = null; }
   $('chatPanel').classList.remove('open');
+}
+function resetChatState(){
+  if(_chatES){ _chatES.close(); _chatES = null; }
+  _chatSession = null;
+  _chatKey = '';
+  _chatTarget = '';
+  _chatScope = 'scan';
+  $('chatPanel').classList.remove('open');
+  $('chatMessages').innerHTML =
+    '<div class="chat-msg assistant">我会根据本次扫描结果解释文件用途、评估文件夹，并检查跨目录关联。</div>';
+}
+function newChat(){
+  const scope = _chatScope || 'scan';
+  const target = _chatTarget || '';
+  resetChatState();
+  openChat(scope, target);
 }
 function renderChatAnswer(data){
   const box = _chatCurrent || addChatMessage('assistant','');

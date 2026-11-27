@@ -217,3 +217,12 @@ class TestAIProvider:
         provider = AIProvider.create("openai", api_key="sk-test", max_output_tokens=4096)
         assert provider.max_output_tokens == 4096
         assert AIProvider.create("openai", api_key="sk-test").max_output_tokens == 1200
+
+    def test_并发调用统计不丢失(self):
+        from concurrent.futures import ThreadPoolExecutor
+        provider = AIProvider.create("local", model="heuristic")
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(lambda _: provider.analyze("f.txt"), range(40)))
+
+        assert provider.stats["total_calls"] == 40

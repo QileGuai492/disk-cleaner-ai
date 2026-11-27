@@ -13,7 +13,7 @@ try:
     from importlib.metadata import version as _pkg_version
     _VERSION = _pkg_version("disk-cleaner")
 except Exception:
-    _VERSION = "0.6.3"
+    _VERSION = "0.6.4"
 
 from disk_cleaner.scanner.walker import FileInfo, scan_directory
 from disk_cleaner.analyzer.engine import AnalysisEngine
@@ -119,14 +119,18 @@ def scan(path: str, top: int, min_size: int, output_format: str, skip_symlinks: 
 @click.option("--force", "-f", is_flag=True, default=False, help="强制重新分析，忽略缓存")
 @click.option("--recursive/--no-recursive", default=True, help="递归扫描子目录")
 @click.option("--top", "-n", type=int, default=50, help="最多分析 N 个文件")
-def analyze(path: str, provider: str, model: str, api_key: str, preview: bool, force: bool, recursive: bool, top: int):
+@click.option("--jobs", "-j", type=int, default=0, help="AI 并发数（0=使用配置；本地 provider 始终串行）")
+def analyze(path: str, provider: str, model: str, api_key: str, preview: bool, force: bool, recursive: bool, top: int, jobs: int):
     """用 AI 分析扫描结果，判断哪些文件可清理"""
     db_path = _get_db_path()
     db = Database(db_path)
     db.initialize()
 
     try:
-        engine = AnalysisEngine(db, ai_provider=provider, ai_model=model, api_key=api_key or "")
+        engine = AnalysisEngine(
+            db, ai_provider=provider, ai_model=model, api_key=api_key or "",
+            ai_max_concurrency=jobs or None,
+        )
 
         if preview:
             # 预览模式：只扫描不做 AI
