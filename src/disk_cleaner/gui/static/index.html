@@ -20,16 +20,18 @@
 </div>
 <div class="welcome" id="backupModal">
   <div class="welcome-card backup-card">
-    <h2>恢复备份</h2>
-    <div class="sub" style="margin-bottom:8px">选择要恢复到原位置的文件；原位置已有同名文件的会跳过，不覆盖。</div>
+    <h2>备份区</h2>
+    <div class="sub" style="margin-bottom:8px">这里保存清理时移走的文件。恢复不会覆盖原位置已有文件；彻底清理不可恢复。</div>
     <div class="backup-toolbar">
       <label class="chk"><input type="checkbox" id="backupAll" onchange="toggleAllBackups(this.checked)">全选</label>
-      <span id="backupCount">未选择</span>
+      <span id="backupCount">0 个文件</span>
     </div>
     <div id="backupList" class="backup-list"></div>
     <div class="row">
       <button onclick="closeBackups()">取消</button>
       <button id="backupRestoreBtn" onclick="restoreSelectedBackups()" disabled>恢复选中</button>
+      <button id="backupDeleteBtn" class="cancel" onclick="deleteSelectedBackups()" disabled>彻底清理选中</button>
+      <button class="cancel" onclick="purgeBackups()">清空备份区</button>
     </div>
   </div>
 </div>

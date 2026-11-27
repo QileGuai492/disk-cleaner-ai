@@ -230,6 +230,8 @@ class GUIHandler(BaseHTTPRequestHandler):
             self._handle_backups()
         elif self.path == "/api/backup/restore":
             self._handle_restore_backup(data)
+        elif self.path == "/api/backup/delete":
+            self._handle_delete_backup(data)
         else:
             self.send_response(404)
             self.end_headers()
@@ -578,6 +580,29 @@ class GUIHandler(BaseHTTPRequestHandler):
         self._respond_json({
             "restored": len(success),
             "failed": len(failed),
+            "errors": [r.error for r in failed if r.error][:10],
+        })
+
+    def _handle_delete_backup(self, data: dict):
+        manager = BackupManager()
+        if data.get("all") is True:
+            items = manager.list_files()
+        else:
+            raw_items = data.get("items")
+            items = [
+                item for item in raw_items
+                if isinstance(item, dict)
+            ] if isinstance(raw_items, list) else []
+        if not items:
+            self._respond_json({"error": "没有选择要彻底清理的备份文件"}, status=400)
+            return
+        results = manager.delete_files(items)
+        success = [r for r in results if r.success]
+        failed = [r for r in results if not r.success]
+        self._respond_json({
+            "deleted": len(success),
+            "failed": len(failed),
+            "freed": sum(int(r.bytes_freed or 0) for r in success),
             "errors": [r.error for r in failed if r.error][:10],
         })
 

@@ -118,6 +118,34 @@ class TestBackupManager:
         remaining = manager.list_files()
         assert len(remaining) == 1 and remaining[0]["name"] == "second.tmp"
 
+    def test_彻底清理选中的备份文件(self, backup_root, temp_dir):
+        manager = BackupManager(str(backup_root))
+        batch_id = manager.create_batch("test")
+        second = temp_dir / "second.tmp"
+        second.write_text("second", encoding="utf-8")
+        manager.backup_file(str(temp_dir / "file_to_clean.tmp"), batch_id)
+        manager.backup_file(str(second), batch_id)
+
+        files = manager.list_files()
+        selected = next(item for item in files if item["name"] == "file_to_clean.tmp")
+        results = manager.delete_files([selected])
+
+        assert len(results) == 1 and results[0].success
+        assert results[0].bytes_freed > 0
+        assert manager.file_count(batch_id) == 1
+        remaining = manager.list_files()
+        assert [item["name"] for item in remaining] == ["second.tmp"]
+
+    def test_清空最后一个备份后删除空批次(self, backup_root, temp_dir):
+        manager = BackupManager(str(backup_root))
+        batch_id = manager.create_batch("test")
+        manager.backup_file(str(temp_dir / "file_to_clean.tmp"), batch_id)
+
+        results = manager.delete_files(manager.list_files())
+        assert results and results[0].success
+        assert manager.file_count(batch_id) == 0
+        assert not (backup_root / batch_id).exists()
+
     def test_按文件恢复不覆盖目标(self, backup_root, temp_dir):
         manager = BackupManager(str(backup_root))
         batch_id = manager.create_batch("test")

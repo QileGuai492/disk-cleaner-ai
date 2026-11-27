@@ -189,6 +189,58 @@ class BackupManager:
                 manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return results
 
+    def delete_files(self, items: list[dict]) -> list[CleanResult]:
+        """永久删除点选的备份文件；删除后无法恢复。"""
+        selections = {
+            (str(item.get("batch_id", "")), str(item.get("backup_path", "")))
+            for item in items
+        }
+        if not selections:
+            return []
+
+        by_batch: dict[str, set[str]] = {}
+        for batch_id, backup_path in selections:
+            by_batch.setdefault(batch_id, set()).add(backup_path)
+
+        results: list[CleanResult] = []
+        for batch_id, selected_paths in by_batch.items():
+            batch_dir = self.backup_root / batch_id
+            manifest = batch_dir / "manifest.json"
+            if not manifest.exists():
+                continue
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            remaining = []
+            changed = False
+            for file_info in data.get("files", []):
+                backup_path = str(file_info.get("backup_path", ""))
+                if backup_path not in selected_paths:
+                    remaining.append(file_info)
+                    continue
+
+                src = Path(backup_path)
+                try:
+                    freed = src.stat().st_size if src.exists() else 0
+                    if src.exists():
+                        src.unlink()
+                    changed = True
+                    results.append(CleanResult(
+                        path=file_info["original_path"], success=True,
+                        bytes_freed=freed, action="permanently_deleted",
+                    ))
+                except Exception as e:
+                    remaining.append(file_info)
+                    results.append(CleanResult(
+                        path=file_info["original_path"], success=False,
+                        bytes_freed=0, action="failed", error=str(e),
+                    ))
+
+            if changed:
+                data["files"] = remaining
+                manifest.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                if not remaining:
+                    self.delete_batch(batch_id)
+        return results
+
     def restore_batch(self, batch_id: str) -> list[CleanResult]:
         """恢复一个批次中的所有文件（保留给 CLI/兼容接口）。"""
         manifest = self.backup_root / batch_id / "manifest.json"

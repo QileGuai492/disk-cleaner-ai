@@ -150,7 +150,7 @@ async function handleScan() {
          </span>
          <span class="result-actions">
            <button onclick="getReport()">导出报告</button>
-            <button onclick="showBackups()">恢复备份</button>
+            <button onclick="showBackups()">备份区</button>
             <button onclick="openChat('folder', cleanPath($('path').value), true)">整体评估</button>
             <button onclick="openChat('scan','')">智能建议</button>
          </span>
@@ -320,7 +320,7 @@ function showResults(data) {
          </span>
          <span class="result-actions">
            <button onclick="getReport()">导出报告</button>
-            <button onclick="showBackups()">恢复备份</button>
+            <button onclick="showBackups()">备份区</button>
             <button onclick="openChat('folder', cleanPath($('path').value), true)">整体评估</button>
             <button onclick="openChat('scan','')">智能建议</button>
          </span>
@@ -432,8 +432,11 @@ function renderBackupList(){
 
 function updateBackupSelection(){
   const checked = document.querySelectorAll('.backup-check:checked').length;
-  $('backupCount').textContent = checked ? `已选 ${checked} 个` : '未选择';
+  const total = _backupFiles.reduce((sum, f) => sum + Number(f.size || 0), 0);
+  const base = `${_backupFiles.length} 个文件 · 共 ${fmtSize(total)}`;
+  $('backupCount').textContent = checked ? `${base} · 已选 ${checked} 个` : base;
   $('backupRestoreBtn').disabled = checked === 0;
+  $('backupDeleteBtn').disabled = checked === 0;
   $('backupAll').checked = checked > 0 && checked === _backupFiles.length;
 }
 
@@ -458,6 +461,38 @@ async function restoreSelectedBackups(){
   if(r.error) return alert(r.error);
   const errors = (r.errors || []).slice(0, 3).join('\n');
   alert(`已恢复 ${r.restored} 个，失败 ${r.failed} 个` + (errors ? `\n\n${errors}` : ''));
+  closeBackups();
+  await showBackups();
+}
+
+async function deleteSelectedBackups(){
+  const items = [...document.querySelectorAll('.backup-check:checked')]
+    .map(cb => _backupFiles[Number(cb.dataset.index)])
+    .filter(Boolean)
+    .map(f => ({batch_id: f.batch_id, backup_path: f.backup_path}));
+  if(!items.length) return;
+  const total = items.reduce((sum, f) => sum + Number(f.size || 0), 0);
+  if(!confirm(`将永久删除选中的 ${items.length} 个备份文件（${fmtSize(total)}）。\n删除后无法恢复，确认继续？`)) return;
+
+  const r = await api('/api/backup/delete', {items});
+  if(r.error) return alert(r.error);
+  const errors = (r.errors || []).slice(0, 3).join('\n');
+  alert(`已彻底清理 ${r.deleted} 个，释放 ${fmtSize(r.freed || 0)}；失败 ${r.failed} 个` +
+    (errors ? `\n\n${errors}` : ''));
+  closeBackups();
+  await showBackups();
+}
+
+async function purgeBackups(){
+  if(!_backupFiles.length) return;
+  const total = _backupFiles.reduce((sum, f) => sum + Number(f.size || 0), 0);
+  if(!confirm(`将永久删除备份区全部 ${_backupFiles.length} 个文件（${fmtSize(total)}）。\n此操作不可恢复。`)) return;
+  const typed = prompt('确认清空备份区，请输入 DELETE：');
+  if(typed !== 'DELETE'){ alert('已取消'); return; }
+
+  const r = await api('/api/backup/delete', {all:true});
+  if(r.error) return alert(r.error);
+  alert(`已彻底清理 ${r.deleted} 个，释放 ${fmtSize(r.freed || 0)}；失败 ${r.failed} 个`);
   closeBackups();
   await showBackups();
 }
