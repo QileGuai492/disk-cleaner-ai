@@ -218,6 +218,24 @@ class TestAIProvider:
         assert provider.max_output_tokens == 4096
         assert AIProvider.create("openai", api_key="sk-test").max_output_tokens == 1200
 
+    def test_限流按间隔匀速放行(self, monkeypatch):
+        from disk_cleaner.analyzer import ai_client
+
+        provider = AIProvider.create("openai", api_key="sk-test", rate_limit_rpm=60)
+        clock = [0.0]
+        sleeps = []
+        monkeypatch.setattr(ai_client.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(
+            ai_client.time, "sleep",
+            lambda seconds: (sleeps.append(seconds), clock.__setitem__(0, clock[0] + seconds)),
+        )
+
+        provider._rate_limit()
+        provider._rate_limit()
+        provider._rate_limit()
+
+        assert sleeps == [pytest.approx(1.0), pytest.approx(1.0)]
+
     def test_并发调用统计不丢失(self):
         from concurrent.futures import ThreadPoolExecutor
         provider = AIProvider.create("local", model="heuristic")

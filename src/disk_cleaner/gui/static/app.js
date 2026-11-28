@@ -3,6 +3,7 @@ let _busy = false, _ctrl = null;
 let _allResults = [];
 let _chatSession = null, _chatTarget = '', _chatScope = 'scan', _chatKey = '', _chatES = null;
 let _lastPlanPaths = [];
+let _pendingChatText = '';
 const $=id=>document.getElementById(id);
 
 async function api(path, data) {
@@ -56,6 +57,8 @@ function loadState() {
 const AI_NAMES={deepseek:'DeepSeek',openai:'OpenAI',claude:'Claude',gemini:'Gemini',ollama:'Ollama (本地)'};
 async function checkAIConfig() {
   const r = await api('/api/check-ai', {});
+  const chatLabel = $('chatAILabel');
+  const chatToggle = $('chatUseAI');
   if (r.configured && r.providers.length > 0) {
     $('useAI').disabled = false;
     $('aiLabel').title = '启用云端AI可获得更准确的分析结果';
@@ -65,7 +68,19 @@ async function checkAIConfig() {
     // 恢复用户上次的选择
     const saved = localStorage.getItem('dc_provider');
     if (saved && r.providers.includes(saved)) sel.value = saved;
+    if (chatLabel && chatToggle) {
+      chatLabel.style.display = 'inline-flex';
+      chatToggle.checked = localStorage.getItem('dc_chat_useAI') !== '0';
+    }
+  } else if (chatLabel && chatToggle) {
+    chatLabel.style.display = 'none';
+    chatToggle.checked = false;
   }
+}
+function saveChatAISetting() {
+  try {
+    localStorage.setItem('dc_chat_useAI', $('chatUseAI').checked ? '1' : '0');
+  } catch(e) {}
 }
 
 function cleanPath(p) {
@@ -529,6 +544,7 @@ function openChat(scope, target, autoAssess = false){
   if(previousSession) payload.session_id = previousSession.session_id;
   api('/api/chat/session', payload).then(r=>{
     if(r.error){
+      _pendingChatText = '';
       if(String(r.error).includes('请先分析目录')){
         alert('GUI 服务已重启，浏览器里的上次分析结果只是本地缓存；请重新分析一次后再使用智能建议。');
       } else {
@@ -547,7 +563,14 @@ function openChat(scope, target, autoAssess = false){
     // 已经有会话时只切换评估范围，保留同一段对话；新会话才清空。
     if(!previousSession) $('chatMessages').innerHTML = '';
     renderQuick(scope);
-    if(autoAssess) askOverallAssessment(scope);
+    if(_pendingChatText){
+      const pending = _pendingChatText;
+      _pendingChatText = '';
+      $('chatText').value = pending;
+      sendChat();
+    } else if(autoAssess){
+      askOverallAssessment(scope);
+    }
   });
 }
 function askOverallAssessment(scope){
@@ -588,6 +611,7 @@ function resetChatState(){
   _chatTarget = '';
   _chatScope = 'scan';
   _lastPlanPaths = [];
+  _pendingChatText = '';
   $('chatPanel').classList.remove('open');
   document.body.classList.remove('chat-open');
   $('chatMessages').innerHTML =
@@ -650,13 +674,18 @@ function renderChatAnswer(data){
   $('chatMessages').scrollTop = $('chatMessages').scrollHeight;
 }
 function sendChat(){
-  if(!_chatSession){ openChat('scan',''); return; }
   const text = $('chatText').value.trim();
   if(!text) return;
+  if(!_chatSession){
+    _pendingChatText = text;
+    openChat('scan','');
+    return;
+  }
   $('chatText').value = '';
   addChatMessage('user', text);
   _chatCurrent = addChatMessage('assistant', '正在读取证据...');
-  const provider = $('useAI').checked ? $('provider').value : '';
+  const chatAI = $('chatUseAI');
+  const provider = chatAI && chatAI.checked ? ($('provider').value || '') : '';
   if(_chatES){ _chatES.close(); }
   const url = `/api/chat/stream?session_id=${encodeURIComponent(_chatSession.session_id)}` +
     `&text=${encodeURIComponent(text)}&provider=${encodeURIComponent(provider)}` +

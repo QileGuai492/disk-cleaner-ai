@@ -98,6 +98,9 @@
   <div class="chat-input">
     <textarea id="chatText" placeholder="问：这个文件能删吗？这个文件夹整体能删吗？" onkeydown="if(event.ctrlKey&&event.key==='Enter'){sendChat()}"></textarea>
     <div class="row">
+      <label class="chk" id="chatAILabel" style="display:none;margin-right:auto" title="启用后会把当前扫描证据发送给云端 AI">
+        <input type="checkbox" id="chatUseAI" checked onchange="saveChatAISetting()">AI 回答
+      </label>
       <button onclick="closeChat()">关闭</button>
       <button onclick="requestChatPlan()">生成计划</button>
       <button onclick="sendChat()">发送</button>

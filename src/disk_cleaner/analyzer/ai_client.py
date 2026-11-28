@@ -289,7 +289,7 @@ class AIProvider:
         self.budget_usd = max(0.0, float(budget_usd))
         self.input_cost_per_million = max(0.0, float(input_cost_per_million))
         self.output_cost_per_million = max(0.0, float(output_cost_per_million))
-        self._call_times: list[float] = []
+        self._next_call_at = 0.0
         self._total_calls = 0
         self._total_tokens = 0
         self._budget_used = 0.0
@@ -428,18 +428,16 @@ class AIProvider:
         return [self.analyze(p) for p in prompts]
 
     def _rate_limit(self) -> None:
-        """滑动窗口限流；锁只保护时间表，等待在锁外进行。"""
+        """匀速限流：按 60/RPM 的间隔逐个放行，避免一批后长时间停顿。"""
+        interval = 60.0 / self.rate_limit_rpm
         while True:
             with self._rate_lock:
-                now = time.time()
-                cutoff = now - 60
-                self._call_times = [t for t in self._call_times if t > cutoff]
-                if len(self._call_times) < self.rate_limit_rpm:
-                    self._call_times.append(now)
+                now = time.monotonic()
+                wait = self._next_call_at - now
+                if wait <= 0:
+                    self._next_call_at = now + interval
                     return
-                wait = self._call_times[0] + 60 - now + 0.5
-            if wait > 0:
-                time.sleep(wait)
+            time.sleep(wait)
 
     def _call(self, prompt: str) -> str:
         """默认实现；具体 provider 子类会覆盖。"""

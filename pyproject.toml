@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "disk-cleaner"
-version = "0.6.7"
+version = "0.6.8"
 description = "AI 驱动的磁盘清理工具"
 readme = "README.md"
 requires-python = ">=3.12"

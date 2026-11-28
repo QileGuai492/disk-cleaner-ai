@@ -166,7 +166,7 @@ def test_ai_answer_anonymizes_paths_and_validates_evidence():
     assert all(action["type"] != "delete_now" for action in answer["actions"])
 
 
-def test_invalid_ai_response_falls_back_to_local():
+def test_non_json_ai_response_is_kept():
     target = "C:/Temp/a.tmp"
 
     class BadAI:
@@ -180,7 +180,9 @@ def test_invalid_ai_response_falls_back_to_local():
         target=target,
     )
     answer = service.answer(context.session_id, "能删吗？", provider="deepseek")
-    assert answer["source"] == "local"
+    assert answer["source"] == "ai"
+    assert answer["verdict"] == "needs_review"
+    assert "not json" in answer["answer"]
 
 
 def test_what_if_answer_mentions_backup():
@@ -194,6 +196,142 @@ def test_what_if_answer_mentions_backup():
     answer = service.answer(context.session_id, "如果删了会怎样？")
     assert "如果删除" in answer["answer"]
     assert "备份" in answer["answer"]
+
+
+def test_ai_caution_verdict_is_preserved_as_needs_review():
+    target = "C:/Users/alice/.qoder"
+    captured = {}
+
+    class FakeAI:
+        def analyze(self, prompt):
+            captured["prompt"] = prompt
+            return json.dumps({
+                "verdict": "caution",
+                "summary": "如果已经卸载 Qoder，并且不需要扩展和配置，这个目录可以删除。",
+                "evidence_ids": ["E1"],
+                "risks": ["会丢失扩展和登录状态"],
+                "confidence": 0.7,
+            })
+
+    service = ChatService(ai_factory=lambda provider: FakeAI())
+    context = service.create_session(
+        [_result(f"{target}/settings.json", "keep", 1000)],
+        scope="folder",
+        target=target,
+    )
+    answer = service.answer(context.session_id, "qoder 不使用了能删吗？", provider="deepseek")
+    assert answer["source"] == "ai"
+    assert answer["verdict"] == "needs_review"
+    assert answer["verdict_raw"] == "caution"
+    assert "如果已经卸载 Qoder" in answer["answer"]
+    assert "注意：" in answer["answer"]
+    assert "verdict 必须是以下之一" in captured["prompt"]
+
+
+def test_ai_alias_verdict_is_normalized():
+    target = "C:/Users/alice/.qoder"
+    class FakeAI:
+        def analyze(self, prompt):
+            return json.dumps({
+                "verdict": "safe",
+                "summary": "可以删除。",
+                "evidence_ids": ["E1"],
+                "confidence": 0.8,
+            })
+
+    service = ChatService(ai_factory=lambda provider: FakeAI())
+    context = service.create_session(
+        [_result(f"{target}/a.tmp", "safe_to_delete", 1000)],
+        scope="folder",
+        target=target,
+    )
+    answer = service.answer(context.session_id, "能删吗？", provider="deepseek")
+    assert answer["verdict"] == "safe_to_delete"
+    assert "已校正" in answer["answer"]
+
+
+def test_malformed_ai_json_is_salvaged():
+    target = "C:/Temp/a.tmp"
+    service = ChatService()
+    context = service.create_session(
+        [_result(target, "safe_to_delete", 1000)], scope="file", target=target
+    )
+    raw = (
+        '{"verdict":"clean_all_with_backup","summary":"第一行\n第二行",'
+        '"evidence_ids":["E1"],"confidence":0.6}'
+    )
+    parsed = service._parse_ai_answer(raw, context)
+    assert parsed is not None
+    assert parsed["verdict"] == "clean_all_with_backup"
+    assert "第一行" in parsed["answer"]
+    assert "格式不完整" in parsed["answer"]
+
+
+def test_plain_text_ai_answer_is_kept():
+    target = "C:/Temp/a.tmp"
+    service = ChatService()
+    context = service.create_session(
+        [_result(target, "safe_to_delete", 1000)], scope="file", target=target
+    )
+    parsed = service._parse_ai_answer("这个文件是临时文件，可以删除。", context)
+    assert parsed is not None
+    assert parsed["verdict"] == "needs_review"
+    assert "可以删除" in parsed["answer"]
+    assert "格式不完整" in parsed["answer"]
+
+
+def test_ai_failure_shows_local_fallback_reason():
+    class BrokenAI:
+        def analyze(self, prompt):
+            raise RuntimeError("empty response")
+
+    service = ChatService(ai_factory=lambda provider: BrokenAI())
+    target = "C:/Temp/a.tmp"
+    context = service.create_session(
+        [_result(target, "safe_to_delete", 1000)], scope="file", target=target
+    )
+    answer = service.answer(context.session_id, "能删吗？", provider="deepseek")
+    assert answer["source"] == "local"
+    assert "AI 调用失败" in answer["answer"]
+    assert answer["fallback_reason"]
+
+
+def test_scan_session_uses_scan_root_not_first_file():
+    folder = "C:/Users/alice/.gradle/caches"
+    results = [
+        _result(f"{folder}/a.jar", "safe_to_delete", 2_000_000),
+        _result(f"{folder}/b.jar", "likely_safe", 1_000_000),
+    ]
+    context = ChatService().create_session(results, scope="scan")
+    assert context.target
+    assert context.target.lower() != results[0]["path"].lower()
+    assert "gradle" in context.target.lower()
+
+
+def test_scan_question_does_not_pretend_to_know_single_file():
+    folder = "C:/Users/alice/.gradle/caches"
+    service = ChatService()
+    context = service.create_session(
+        [_result(f"{folder}/a.jar", "safe_to_delete", 2_000_000)], scope="scan"
+    )
+    answer = service.answer(context.session_id, "这个能删吗？")
+    assert "整次扫描" in answer["answer"]
+    assert "单个文件" in answer["answer"]
+
+
+def test_scan_question_lists_clean_candidates():
+    folder = "C:/Users/alice/.gradle/caches"
+    service = ChatService()
+    context = service.create_session(
+        [
+            _result(f"{folder}/a.jar", "safe_to_delete", 2_000_000),
+            _result(f"{folder}/b.jar", "safe_to_delete", 1_000_000),
+        ],
+        scope="scan",
+    )
+    answer = service.answer(context.session_id, "哪些最值得清理？")
+    assert "最值得关注" in answer["answer"]
+    assert "a.jar" in answer["answer"]
 
 
 def test_rebind_keeps_same_conversation():

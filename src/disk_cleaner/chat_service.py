@@ -41,6 +41,45 @@ VERDICT_LABELS = {
 
 ALLOWED_VERDICTS = set(VERDICT_LABELS)
 
+# 模型经常用自然语言词代替固定 verdict；这里做保守映射，非法值仍保留回答。
+VERDICT_ALIASES = {
+    "safe": "safe_to_delete",
+    "safe_to_remove": "safe_to_delete",
+    "clean": "safe_to_delete",
+    "可删除": "safe_to_delete",
+    "安全": "safe_to_delete",
+    "likely": "likely_safe",
+    "probably_safe": "likely_safe",
+    "可能可删": "likely_safe",
+    "caution": "needs_review",
+    "risky": "needs_review",
+    "review": "needs_review",
+    "maybe": "needs_review",
+    "需要确认": "needs_review",
+    "谨慎": "needs_review",
+    "unsafe": "keep",
+    "do_not_delete": "keep",
+    "recommend_keep": "keep",
+    "保留": "keep",
+    "不要删除": "keep",
+    "禁止删除": "critical",
+    "unknown": "insufficient_evidence",
+    "证据不足": "insufficient_evidence",
+    "只清理缓存": "clean_cache_only",
+    "备份后清理": "clean_all_with_backup",
+    "建议搬迁": "relocate_with_junction",
+}
+
+
+def normalize_verdict(value) -> tuple[str | None, str]:
+    """把模型返回的 verdict 归一化；返回 (合法值或 None, 原始值)。"""
+    raw = str(value or "").strip()
+    normalized = raw.lower()
+    if normalized in ALLOWED_VERDICTS:
+        return normalized, raw
+    alias = VERDICT_ALIASES.get(normalized) or VERDICT_ALIASES.get(raw)
+    return alias, raw
+
 # 常见开发工具/目录的通俗解释。聊天顾问先解释“这是什么”，再谈清理。
 TECH_KNOWLEDGE: dict[str, dict] = {
     "gradle": {
@@ -137,6 +176,7 @@ class ChatContext:
     folder: dict | None = None
     file: dict | None = None
     history: list[dict] = field(default_factory=list)
+    ai_error: str = ""
 
     @property
     def total_bytes(self) -> int:
@@ -191,13 +231,17 @@ class ChatService:
     ) -> ChatContext:
         items = list(results)[:1000]
         scope = scope if scope in ("file", "folder", "selection", "scan") else "scan"
-        target = target or (items[0].get("path", "") if items else "")
+        requested_target = (target or "").strip()
+        target = requested_target or (items[0].get("path", "") if items else "")
         if not root and items:
             try:
                 root = os.path.commonpath([r.get("path", "") for r in items])
             except ValueError:
                 # 跨盘符时没有共同根目录，退回当前目标/第一个路径
                 root = target or items[0].get("path", "")
+        # 整次扫描的范围是扫描根目录，不能默认成第一个文件。
+        if scope == "scan" and not requested_target:
+            target = root or ""
 
         if scope == "file":
             context = self._file_context(items, target, scan_id, root)
@@ -367,9 +411,23 @@ class ChatService:
         context.history.append({"role": "user", "content": question})
         context.history.append({"role": "assistant", "content": result.get("answer", "")})
         context.history = context.history[-8:]
+        try:
+            from disk_cleaner.logging_utils import get_logger
+            get_logger("chat").info(
+                "chat source=%s provider=%s scope=%s verdict=%s raw=%s "
+                "warning=%s fallback=%s qlen=%d",
+                result.get("source", ""), provider or "local",
+                context.scope, result.get("verdict", ""),
+                result.get("verdict_raw", ""),
+                result.get("validation_warning", ""),
+                result.get("fallback_reason", ""), len(question),
+            )
+        except Exception:
+            pass
         return result
 
     def _try_ai(self, context: ChatContext, question: str, provider: str, intent: str = "clean") -> dict | None:
+        context.ai_error = ""
         if not provider or provider == "local":
             return None
         try:
@@ -393,7 +451,9 @@ class ChatService:
                         {"type": "ask_user", "label": "继续追问"},
                     ]
                 return parsed
-        except (AIUnavailableError, Exception):
+            context.ai_error = "AI 返回内容不完整或格式无法解析"
+        except (AIUnavailableError, Exception) as exc:
+            context.ai_error = f"AI 调用失败：{exc}"
             return None
         return None
 
@@ -408,6 +468,11 @@ class ChatService:
             "如果意图是 explain（例如“Gradle 是什么”）：先用通俗语言解释这个概念，"
             "再说明当前路径与它的关系；不要默认给清理计划，只有用户明确问“能删吗”才谈清理。",
             "如果意图是 clean 或 impact：先用一句话说清“这是什么”，再给结论、依据、风险和建议。",
+            "用户问“整个目录能不能删”时，先明确回答可以/不建议/需要确认，再说明前提；"
+            "不要只给通用清理建议。",
+            "verdict 必须是以下之一：safe_to_delete, likely_safe, needs_review, keep, critical, "
+            "clean_cache_only, clean_all_with_backup, relocate_with_junction, insufficient_evidence。"
+            "禁止使用 caution、risky、safe 等自造值。",
             "输出 JSON：{\"verdict\":\"...\",\"summary\":\"...\",\"evidence_ids\":[\"E1\"],"
             "\"risks\":[\"...\"],\"actions\":[{\"type\":\"draft_plan\",\"label\":\"生成清理计划\"}],"
             "\"followups\":[\"...\"],\"confidence\":0.0}",
@@ -437,45 +502,144 @@ class ChatService:
         lines.append(f"[问题] {question}")
         return "\n".join(lines)
 
-    def _parse_ai_answer(self, raw: str, context: ChatContext, intent: str = "clean") -> dict | None:
-        text = raw or ""
+    @staticmethod
+    def _json_string_field(text: str, key: str) -> str:
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*"', text)
+        if not match:
+            return ""
+        chars: list[str] = []
+        index = match.end()
+        while index < len(text):
+            char = text[index]
+            if char == "\\":
+                if index + 1 >= len(text):
+                    break
+                next_char = text[index + 1]
+                chars.append({
+                    "n": "\n", "r": "\r", "t": "\t",
+                    '"': '"', "\\": "\\", "/": "/",
+                }.get(next_char, next_char))
+                index += 2
+                continue
+            if char == '"':
+                break
+            chars.append(char)
+            index += 1
+        return "".join(chars).strip()
+
+    @classmethod
+    def _extract_ai_payload(cls, text: str) -> tuple[dict | None, bool]:
+        """解析 JSON；失败时从文本中恢复 summary/verdict 等字段。"""
+        text = (text or "").strip()
         match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
         if match:
-            text = match.group(1)
-        try:
-            data = json.loads(text)
-        except (json.JSONDecodeError, TypeError):
-            return None
+            text = match.group(1).strip()
+
+        candidates = [text]
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            candidates.insert(0, text[start:end + 1])
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(data, dict):
+                return data, False
+
+        summary = cls._json_string_field(text, "summary")
+        if not summary:
+            summary = cls._json_string_field(text, "answer")
+        if not summary:
+            # 模型返回普通文本而不是 JSON 时，也保留正文，只按“需要确认”处理。
+            plain = text.strip()
+            if plain and not plain.startswith("{"):
+                return {
+                    "verdict": "",
+                    "summary": plain[:2000],
+                    "evidence_ids": re.findall(r"\bE\d+\b", plain),
+                    "risks": [],
+                    "confidence": 0.4,
+                }, True
+            return None, False
+        verdict_match = re.search(r'"verdict"\s*:\s*"([^"]*)"', text)
+        confidence_match = re.search(r'"confidence"\s*:\s*([0-9]+(?:\.[0-9]+)?)', text)
+        risks_match = re.search(r'"risks"\s*:\s*\[', text)
+        risks: list[str] = []
+        if risks_match:
+            risks_end = text.find("]", risks_match.end())
+            risks_block = text[risks_match.end():risks_end if risks_end >= 0 else len(text)]
+            risks = re.findall(r'"((?:\\.|[^"\\])*)"', risks_block)
+        data = {
+            "verdict": verdict_match.group(1) if verdict_match else "",
+            "summary": summary,
+            "evidence_ids": re.findall(r"\bE\d+\b", text),
+            "risks": risks,
+            "confidence": float(confidence_match.group(1)) if confidence_match else 0.5,
+        }
+        return data, True
+
+    def _parse_ai_answer(self, raw: str, context: ChatContext, intent: str = "clean") -> dict | None:
+        data, salvaged = self._extract_ai_payload(raw)
         if not isinstance(data, dict):
             return None
-        verdict = data.get("verdict")
-        if verdict not in ALLOWED_VERDICTS:
-            return None
+        raw_verdict = data.get("verdict", "")
+        verdict, raw_verdict_text = normalize_verdict(raw_verdict)
+        warnings: list[str] = []
+        if salvaged:
+            warnings.append("AI 返回格式不完整，已从文本恢复主要内容")
+        if verdict is None:
+            verdict = "needs_review"
+            warnings.append(
+                f"AI 返回了未识别的结论“{str(raw_verdict_text)[:40]}”，已按需要确认处理"
+            )
+        elif verdict != str(raw_verdict_text).strip().lower():
+            warnings.append(
+                f"AI 结论“{str(raw_verdict_text)[:40]}”已校正为"
+                f"{VERDICT_LABELS.get(verdict, verdict)}"
+            )
+
         valid_ids = {item["id"] for item in context.evidence}
-        evidence_ids = [e for e in data.get("evidence_ids", []) if e in valid_ids]
+        raw_ids = data.get("evidence_ids", [])
+        if not isinstance(raw_ids, list):
+            raw_ids = []
+        evidence_ids = [e for e in raw_ids if e in valid_ids]
         if not evidence_ids and intent != "explain":
-            return None
-        summary = str(data.get("summary") or "").strip()
+            warnings.append("AI 未提供可校验的证据编号，置信度已降低")
+
+        summary = str(data.get("summary") or data.get("answer") or "").strip()
         if not summary:
             return None
-        risks = [str(r) for r in data.get("risks", []) if isinstance(r, (str, int, float))]
+        raw_risks = data.get("risks", [])
+        if not isinstance(raw_risks, list):
+            raw_risks = []
+        risks = [str(r) for r in raw_risks if isinstance(r, (str, int, float))]
         raw_actions = data.get("actions") if isinstance(data.get("actions"), list) else []
         allowed_actions = {"draft_plan", "open_folder", "ask_user", "whitelist"}
         actions = [
             action for action in raw_actions
             if isinstance(action, dict) and action.get("type") in allowed_actions
         ]
-        followups = [str(f) for f in data.get("followups", []) if isinstance(f, str)]
+        raw_followups = data.get("followups", [])
+        if not isinstance(raw_followups, list):
+            raw_followups = []
+        followups = [str(f) for f in raw_followups if isinstance(f, str)]
         try:
             confidence = float(data.get("confidence", 0.6))
         except (TypeError, ValueError):
             confidence = 0.6
+        if warnings:
+            confidence = min(confidence, 0.55)
         answer_text = self._format_answer(summary, evidence_ids, risks)
+        if warnings:
+            answer_text = "注意：" + "；".join(warnings) + "\n\n" + answer_text
         return {
             "session_id": context.session_id,
             "answer": answer_text,
             "verdict": verdict,
             "verdict_label": VERDICT_LABELS.get(verdict, verdict),
+            "verdict_raw": raw_verdict_text,
+            "validation_warning": "；".join(warnings),
             "confidence": max(0.0, min(1.0, confidence)),
             "evidence_ids": evidence_ids,
             "evidence": context.evidence,
@@ -529,6 +693,9 @@ class ChatService:
 
         if intent == "explain":
             lines: list[str] = []
+            if context.ai_error:
+                lines.append(f"（{context.ai_error}，以下为本地规则回答）")
+                lines.append("")
             if explanation:
                 lines.append(f"说明：{explanation['what']}")
                 lines.append("")
@@ -537,13 +704,17 @@ class ChatService:
                 lines.append(f"怎么处理：{explanation['advice']}")
                 confidence = 0.8
             else:
-                lines.append("说明：从当前扫描证据看，我只能确认这个路径的元信息，不能仅凭文件名断定它属于哪个软件。")
-                if context.file:
-                    lines.append(f"- 文件：{context.file.get('path')}")
-                    lines.append(f"- 大小：{int(context.file.get('size') or 0) / 1024**2:.1f} MB")
-                    lines.append(f"- 判定：{VERDICT_LABELS.get(context.file.get('decision'), context.file.get('decision'))}")
-                lines.append("")
-                lines.append("如果你知道它属于哪个软件，或者想让我结合内容摘要判断，可以继续追问。")
+                if context.scope == "scan":
+                    lines.append("说明：当前是整次扫描范围，不能只凭扫描汇总判断某个具体文件。")
+                    lines.append("要问单个文件，请点结果行末尾的“问”；要了解目录，请用“整体评估”。")
+                else:
+                    lines.append("说明：从当前扫描证据看，我只能确认这个路径的元信息，不能仅凭文件名断定它属于哪个软件。")
+                    if context.file:
+                        lines.append(f"- 文件：{context.file.get('path')}")
+                        lines.append(f"- 大小：{int(context.file.get('size') or 0) / 1024**2:.1f} MB")
+                        lines.append(f"- 判定：{VERDICT_LABELS.get(context.file.get('decision'), context.file.get('decision'))}")
+                    lines.append("")
+                    lines.append("如果你知道它属于哪个软件，或者想让我结合内容摘要判断，可以继续追问。")
                 confidence = 0.35
             lines.append("")
             lines.append("依据：")
@@ -572,9 +743,39 @@ class ChatService:
                 ],
                 "followups": ["那它能删吗？", "删除后会影响项目吗？", "怎么清理比较安全？"],
                 "source": "local",
+                "fallback_reason": context.ai_error,
             }
 
         lines = []
+        if context.ai_error:
+            lines.append(f"（{context.ai_error}，以下为本地规则回答）")
+            lines.append("")
+        if context.scope == "scan":
+            if any(key in question for key in ("这个", "它", "该文件")):
+                lines.append("你问的是某个具体对象，但当前智能建议范围是整次扫描，无法确定“这个”指哪个文件。")
+                lines.append("请点结果行末尾的“问”来问单个文件，或用“整体评估”查看目录。")
+                lines.append("")
+            elif context.clean_items and any(
+                key in question for key in ("哪些", "什么", "最值得", "清理")
+            ):
+                lines.append("本次扫描中最值得关注的可清理项：")
+                top = sorted(
+                    context.clean_items,
+                    key=lambda item: int(item.get("size") or 0),
+                    reverse=True,
+                )[:10]
+                for item in top:
+                    lines.append(
+                        f"- {item['path']}（{int(item.get('size') or 0) / 1024**2:.1f} MB）"
+                    )
+                lines.append("")
+            elif context.risks and any(
+                key in question for key in ("风险", "不可靠", "误删")
+            ):
+                lines.append("本次扫描的主要风险：")
+                for risk in context.risks[:5]:
+                    lines.append(f"- {risk}")
+                lines.append("")
         if explanation:
             lines.append(f"这是什么：{explanation['what']}")
             lines.append(f"你这里的路径：{explanation['local']}")
@@ -644,6 +845,7 @@ class ChatService:
             "actions": self._default_actions(context),
             "followups": self._followups(context),
             "source": "local",
+            "fallback_reason": context.ai_error,
         }
 
     def _format_answer(self, summary: str, evidence_ids: list[str], risks: list[str]) -> str:
